@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BestBinaryBuffers/BestBinaryBuffers.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/BestBinaryBuffers.Tests/BestBinaryBuffers.Tests.csproj" />
+  </Folder>
+</Solution>
