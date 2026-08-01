@@ -28,17 +28,19 @@ public static class CppGenerator
 			if (open) sb.Append($"namespace {ns.Name} {{\n");
 			sb.Append($"constexpr uint16_t NAMESPACE_ID = {ns.Id};\n\n");
 			foreach (var e in ns.Enums) sb.Append(GenerateEnum(e));
-			foreach (var s in ns.Structs) sb.Append(GenerateStruct(s));
 			if (open) sb.Append($"}} // namespace {ns.Name}\n\n");
 		}
-		foreach (var ns in namespaces)
-		{
-			if (ns.Classes.Count == 0) continue;
-			var open = ns.Name.Length > 0;
-			if (open) sb.Append($"namespace {ns.Name} {{\n");
-			foreach (var c in ns.Classes) sb.Append(GenerateClass(c));
-			if (open) sb.Append($"}} // namespace {ns.Name}\n\n");
-		}
+		// Structs may reference other structs (StructRefField, incl. inside RepeatedField), possibly
+		// declared later in the same namespace or in a different namespace entirely -- unlike the TS
+		// output (function/class declarations, order-independent at call time), a C++ struct must be
+		// fully defined before anything embeds it by value. Emitted in dependency order (topological
+		// sort over ALL namespaces combined) instead of raw declaration order, individually re-opening
+		// each item's namespace as needed.
+		EmitInDependencyOrder(sb, TopoSortStructs(namespaces), GenerateStruct);
+		// Same reasoning for classes: a class with a PolymorphicField/PolymorphicArrayField embeds its
+		// variant classes' Payload types inside the Append*Element helpers generated alongside it, so
+		// those variants must already be fully defined.
+		EmitInDependencyOrder(sb, TopoSortClasses(namespaces), GenerateClass);
 		foreach (var ns in namespaces)
 		{
 			var open = ns.Name.Length > 0;
@@ -49,6 +51,91 @@ public static class CppGenerator
 
 		sb.Append("} // namespace WsProtocol\n");
 		return sb.ToString();
+	}
+
+	// --- Dependency ordering -------------------------------------------------------------------------
+
+	// Emits each (namespace, item) pair in the given order, re-opening/closing "namespace X { ... }"
+	// only when the namespace actually changes from one item to the next (items sharing a namespace
+	// stay in the same block; dependency order can otherwise interleave namespaces freely).
+	private static void EmitInDependencyOrder<T>(StringBuilder sb, IReadOnlyList<(NamespaceDef Ns, T Item)> ordered, Func<T, string> generate)
+	{
+		string? openNs = null;
+		foreach (var (ns, item) in ordered)
+		{
+			if (openNs != ns.Name)
+			{
+				if (!string.IsNullOrEmpty(openNs)) sb.Append($"}} // namespace {openNs}\n\n");
+				if (ns.Name.Length > 0) sb.Append($"namespace {ns.Name} {{\n");
+				openNs = ns.Name;
+			}
+			sb.Append(generate(item));
+		}
+		if (!string.IsNullOrEmpty(openNs)) sb.Append($"}} // namespace {openNs}\n\n");
+	}
+
+	// Stable DFS-based topological sort (dependencies first) over ALL namespaces combined -- a
+	// struct/class is keyed by (Namespace, Name), which the schema already guarantees unique.
+	private static List<(NamespaceDef Ns, StructDef Item)> TopoSortStructs(IReadOnlyList<NamespaceDef> namespaces)
+	{
+		var all = new List<(NamespaceDef Ns, StructDef Item)>();
+		foreach (var ns in namespaces) foreach (var s in ns.Structs) all.Add((ns, s));
+		var byKey = all.ToDictionary(x => (x.Ns.Name, x.Item.Name), x => x);
+		var visited = new HashSet<(string, string)>();
+		var result = new List<(NamespaceDef, StructDef)>();
+		void Visit((string, string) key)
+		{
+			if (!visited.Add(key)) return;
+			var (ns, s) = byKey[key];
+			foreach (var dep in StructDependencies(s))
+			{
+				var depKey = (dep.Namespace, dep.Name);
+				if (byKey.ContainsKey(depKey)) Visit(depKey);
+			}
+			result.Add((ns, s));
+		}
+		foreach (var x in all) Visit((x.Ns.Name, x.Item.Name));
+		return result;
+	}
+
+	private static IEnumerable<StructDef> StructDependencies(StructDef s)
+	{
+		foreach (var f in s.Fields)
+		{
+			if (f is StructRefField srf) yield return srf.Struct;
+			if (f is RepeatedField { Element: StructRefField srf2 }) yield return srf2.Struct;
+		}
+	}
+
+	private static List<(NamespaceDef Ns, ClassDef Item)> TopoSortClasses(IReadOnlyList<NamespaceDef> namespaces)
+	{
+		var all = new List<(NamespaceDef Ns, ClassDef Item)>();
+		foreach (var ns in namespaces) foreach (var c in ns.Classes) all.Add((ns, c));
+		var byKey = all.ToDictionary(x => (x.Ns.Name, x.Item.Name), x => x);
+		var visited = new HashSet<(string, string)>();
+		var result = new List<(NamespaceDef, ClassDef)>();
+		void Visit((string, string) key)
+		{
+			if (!visited.Add(key)) return;
+			var (ns, c) = byKey[key];
+			foreach (var dep in ClassDependencies(c))
+			{
+				var depKey = (dep.Namespace, dep.Name);
+				if (byKey.ContainsKey(depKey)) Visit(depKey);
+			}
+			result.Add((ns, c));
+		}
+		foreach (var x in all) Visit((x.Ns.Name, x.Item.Name));
+		return result;
+	}
+
+	private static IEnumerable<ClassDef> ClassDependencies(ClassDef c)
+	{
+		foreach (var f in c.Fields)
+		{
+			if (f is PolymorphicField pf) foreach (var v in pf.Variants) yield return v;
+			if (f is PolymorphicArrayField paf) foreach (var v in paf.Variants) yield return v;
+		}
 	}
 
 	// --- Naming ------------------------------------------------------------------------------------
@@ -385,13 +472,17 @@ public static class CppGenerator
 	private static string GenerateClass(ClassDef c)
 	{
 		var sb = new StringBuilder();
+
+		// A class may itself carry (as its last field) a PolymorphicField -- needs the same Append*/
+		// Decode*Elements helpers as a message's trailing polymorphic field. Emitted BEFORE "namespace
+		// {c.Name} {" opens (not nested under it): the identifiers already embed the owning class +
+		// field name for uniqueness (s. GenerateClassTaggedHelpers), so nesting them one level deeper
+		// would only add a qualification ("Namespace::ClassName::Helper") that callers don't need.
+		foreach (var pf in c.Fields.OfType<PolymorphicField>()) sb.Append(GenerateClassTaggedHelpers(c.Name, pf.Name, pf.Variants));
+
 		if (c.Description is not null) sb.Append($"// {c.Description}\n");
 		sb.Append($"namespace {c.Name} {{\n");
 		sb.Append($"constexpr uint16_t CLASS_ID = {c.Id};\n\n");
-
-		// A class may itself carry (as its last field) a PolymorphicField -- needs the same Append*/
-		// Decode*Elements helpers as a message's trailing polymorphic field.
-		foreach (var pf in c.Fields.OfType<PolymorphicField>()) sb.Append(GenerateClassTaggedHelpers(c.Name, pf.Name, pf.Variants));
 
 		sb.Append("struct Payload {\n");
 		foreach (var f in c.Fields) sb.Append(FieldDecl(f, c.Name));
@@ -510,15 +601,19 @@ public static class CppGenerator
 	private static string GenerateMessage(Message msg)
 	{
 		var sb = new StringBuilder();
-		if (msg.Description is not null) sb.Append($"// {msg.Description}\n");
-		sb.Append($"namespace {msg.Name} {{\n");
-		sb.Append($"constexpr uint16_t TYPE_ID = {msg.Id};\n");
-		sb.Append($"constexpr MessageKind KIND = {KindEnumCpp(msg.Kind)};\n\n");
 
+		// Emitted BEFORE "namespace {msg.Name} {" opens (not nested under it) -- same reasoning as
+		// GenerateClass: the identifiers already embed the owning message + field name for uniqueness,
+		// so nesting them one level deeper would only add a qualification callers don't need.
 		foreach (var af in msg.Fields.OfType<UniformPackedArrayField>()) sb.Append(GenerateUniformPackedArrayHelpers(msg.Name, af));
 		foreach (var vf in msg.Fields.OfType<UniformVariableArrayField>()) sb.Append(GenerateUniformVariableArrayHelpers(msg.Name, vf));
 		foreach (var paf in msg.Fields.OfType<PolymorphicArrayField>()) sb.Append(GenerateClassTaggedHelpers(msg.Name, paf.Name, paf.Variants));
 		foreach (var pf in msg.Fields.OfType<PolymorphicField>()) sb.Append(GenerateClassTaggedHelpers(msg.Name, pf.Name, pf.Variants));
+
+		if (msg.Description is not null) sb.Append($"// {msg.Description}\n");
+		sb.Append($"namespace {msg.Name} {{\n");
+		sb.Append($"constexpr uint16_t TYPE_ID = {msg.Id};\n");
+		sb.Append($"constexpr MessageKind KIND = {KindEnumCpp(msg.Kind)};\n\n");
 
 		sb.Append("struct Payload {\n");
 		foreach (var f in msg.Fields) sb.Append(FieldDecl(f, msg.Name));
