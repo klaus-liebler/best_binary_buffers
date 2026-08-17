@@ -27,7 +27,7 @@ public class GeneratorTests
 		// never a 4-byte length prefix (the old JSON-schema generator's wire format, deliberately dropped).
 		Assert.Contains("dest[pos++] = 0;", cpp);
 		Assert.DoesNotContain("Length >> 24", cpp); // old length-prefix encoding pattern must be gone
-		Assert.Contains("decodeCString", ts);
+		Assert.Contains("readCString", ts);
 	}
 
 	[Fact]
