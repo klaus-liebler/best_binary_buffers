@@ -201,6 +201,17 @@ public static class TsGenerator
 			}
 		}
 
+		// Compact enum-like bidirectional lookup (NAME -> value AND value -> NAME) built at module-init
+		// time from a single forward object literal, instead of TypeScript's built-in "enum" -- a real
+		// "enum" bakes every member's name into the compiled output TWICE (once per direction), which
+		// dominates bundle size for enums with many/long-named values (e.g. a board's ApplicationId
+		// enum). Access patterns stay identical to a real enum: Enum.NAME and Enum[value].
+		function biEnum<T extends Record<string, number>>(fwd: T): T & { [value: number]: keyof T } {
+			const out: any = { ...fwd };
+			for (const k in fwd) out[(fwd as any)[k]] = k;
+			return out;
+		}
+
 		""";
 
 	// --- Scalar field encode/decode (Fixed/EnumRef/StructRef), shared by EVERY context (struct field,
@@ -337,13 +348,18 @@ public static class TsGenerator
 
 	// --- Enum ----------------------------------------------------------------------------------------
 
+	// "<Name>_VALUES" stays unexported (module-private, only referenced by the two lines below) --
+	// the type is derived from it via "typeof ... [keyof typeof ...]" (a numeric-literal union, same
+	// as a real enum's type, erased at compile time -- zero runtime cost), and biEnum() builds the
+	// actual bidirectional runtime lookup from the same single object literal (s. RuntimeHelpers).
 	private static string GenerateEnum(EnumDef e, string indent)
 	{
 		var sb = new StringBuilder();
 		if (e.Description is not null) sb.Append($"{indent}// {e.Description}\n");
-		sb.Append($"{indent}export enum {e.Name} {{ ");
-		sb.Append(string.Join(", ", e.Values.Select(v => $"{v.Name} = {v.Value}")));
-		sb.Append(" }\n\n");
+		var entries = string.Join(", ", e.Values.Select(v => $"{v.Name}: {v.Value}"));
+		sb.Append($"{indent}const {e.Name}_VALUES = {{ {entries} }} as const;\n");
+		sb.Append($"{indent}export type {e.Name} = typeof {e.Name}_VALUES[keyof typeof {e.Name}_VALUES];\n");
+		sb.Append($"{indent}export const {e.Name} = biEnum({e.Name}_VALUES);\n\n");
 		return sb.ToString();
 	}
 
