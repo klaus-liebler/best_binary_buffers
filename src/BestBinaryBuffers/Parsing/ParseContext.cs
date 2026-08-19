@@ -151,7 +151,7 @@ internal sealed class ParseContext(
 				fields.Add(ResolveField(fieldDecl, declarator, ns, ownerDescription, ownerKind));
 			}
 		}
-		SchemaValidation.ValidateFields(fields, ownerDescription);
+		SchemaValidation.ValidateFields(fields, ns, ownerDescription);
 		return fields;
 	}
 

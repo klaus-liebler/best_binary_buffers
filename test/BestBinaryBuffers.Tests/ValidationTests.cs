@@ -133,6 +133,24 @@ public class ValidationTests
 		""", "nicht erlaubt");
 
 	[Fact]
+	public void ArrayFieldNamedLikeItsNamespaceIsRejected() => ExpectSchemaError("""
+		using BestBinaryBuffers;
+		namespace ns;
+		[BinaryType]
+		public struct Item { public byte V; }
+		[BinaryMessage(MessageKind.Event)]
+		public class Bad { public Item[] Ns; }
+		""", "derzeit nicht unterstuetzt");
+
+	[Fact]
+	public void RepeatedFieldNamedLikeItsNamespaceIsRejected() => ExpectSchemaError("""
+		using BestBinaryBuffers;
+		namespace ns;
+		[BinaryType]
+		public struct Bad { [BinaryCount(2)] public byte[] Ns; }
+		""", "derzeit nicht unterstuetzt");
+
+	[Fact]
 	public void RealCSharpSyntaxErrorSurfacesAsSchemaException() => ExpectSchemaError("""
 		using BestBinaryBuffers;
 		namespace ns
