@@ -35,7 +35,7 @@ internal static class Fixtures
 		public class DeviceInfo
 		{
 			public ushort Id;
-			public string Name;
+			[BinaryMaxEncodedByteLength(31)] public string Name;
 		}
 
 		[BinaryUnion]
@@ -50,13 +50,13 @@ internal static class Fixtures
 		[BinaryType]
 		public class TextCommand : ICommand
 		{
-			public string Text;
+			[BinaryMaxEncodedByteLength(63)] public string Text;
 		}
 
 		[BinaryType]
 		public class Wrapper
 		{
-			public string Label;
+			[BinaryMaxEncodedByteLength(31)] public string Label;
 			public ICommand Selected;
 		}
 
@@ -72,15 +72,15 @@ internal static class Fixtures
 			public Vector3 Position;
 			public Color Mood;
 			public Mac Address;
-			public Vector3[] Waypoints;
-			public string[] Tags;
-			public ICommand[] Commands;
+			[BinaryMaxItemCount(8)] public Vector3[] Waypoints;
+			[BinaryMaxItemCount(4)] [BinaryMaxEncodedByteLength(15)] public string[] Tags;
+			[BinaryMaxItemCount(4)] public ICommand[] Commands;
 		}
 
 		[BinaryMessage(MessageKind.Event)]
 		public class NotifyThing
 		{
-			public string Message;
+			[BinaryMaxEncodedByteLength(127)] public string Message;
 		}
 		""";
 }

@@ -139,7 +139,7 @@ public class ValidationTests
 		[BinaryType]
 		public struct Item { public byte V; }
 		[BinaryMessage(MessageKind.Event)]
-		public class Bad { public Item[] Ns; }
+		public class Bad { [BinaryMaxItemCount(4)] public Item[] Ns; }
 		""", "derzeit nicht unterstuetzt");
 
 	[Fact]

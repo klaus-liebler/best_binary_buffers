@@ -160,14 +160,25 @@ internal sealed class ParseContext(
 		var name = ToCamelCase(declarator.Identifier.Text);
 		var description = AttributeHelpers.ExtractDescription(fieldDecl);
 		var countAttr = fieldDecl.FindAttribute("BinaryCount");
+		var maxLengthAttr = fieldDecl.FindAttribute("BinaryMaxEncodedByteLength");
+		var maxCountAttr = fieldDecl.FindAttribute("BinaryMaxItemCount");
 		var fieldLabel = $"{ownerDescription}, Feld \"{name}\"";
 		var type = fieldDecl.Declaration.Type;
+
+		int ReadMaxLength() => AttributeHelpers.GetIntArgument(AttributeHelpers.ResolveArguments(maxLengthAttr!, "maxEncodedByteLength"), "maxEncodedByteLength") is var v && v > 0
+			? v : throw new SchemaException($"{fieldLabel}: [BinaryMaxEncodedByteLength] muss > 0 sein.");
+		int ReadMaxCount() => AttributeHelpers.GetIntArgument(AttributeHelpers.ResolveArguments(maxCountAttr!, "maxItemCount"), "maxItemCount") is var v && v > 0
+			? v : throw new SchemaException($"{fieldLabel}: [BinaryMaxItemCount] muss > 0 sein.");
 
 		if (type is ArrayTypeSyntax arrayType)
 		{
 			var elementType = arrayType.ElementType;
 			if (countAttr is not null)
 			{
+				if (maxLengthAttr is not null || maxCountAttr is not null)
+				{
+					throw new SchemaException($"{fieldLabel}: [BinaryMaxEncodedByteLength]/[BinaryMaxItemCount] sind auf einem [BinaryCount]-Feld (fest, nicht wire-praefixiert) ueberfluessig.");
+				}
 				var args = AttributeHelpers.ResolveArguments(countAttr, "count");
 				var count = AttributeHelpers.GetIntArgument(args, "count");
 				if (count <= 0) throw new SchemaException($"{fieldLabel}: [BinaryCount] muss > 0 sein.");
@@ -178,14 +189,43 @@ internal sealed class ParseContext(
 			{
 				throw new SchemaException($"{fieldLabel}: Arrays ohne [BinaryCount] sind nur in einer Message erlaubt -- in Struct/Class braucht ein Array-Feld [BinaryCount(N)].");
 			}
-			return ResolveMessageArrayField(name, description, elementType, ns, fieldLabel);
+			if (maxCountAttr is null)
+			{
+				throw new SchemaException($"{fieldLabel}: variable Arrays brauchen [BinaryMaxItemCount(N)] (bestimmt die maximale Elementanzahl fuer die generierte {{Message}}_MAX_SIZE-Konstante).");
+			}
+			var maxCount = ReadMaxCount();
+			int? maxElementLength = maxLengthAttr is not null ? ReadMaxLength() : null;
+			return ResolveMessageArrayField(name, description, elementType, ns, fieldLabel, maxCount, maxElementLength);
 		}
 
 		if (countAttr is not null)
 		{
 			throw new SchemaException($"{fieldLabel}: [BinaryCount] ist nur auf Array-Feldern (T[]) erlaubt.");
 		}
-		return ResolveScalarField(name, description, type, ns, fieldLabel, ownerKind);
+		if (maxCountAttr is not null)
+		{
+			throw new SchemaException($"{fieldLabel}: [BinaryMaxItemCount] ist nur auf variablen Array-Feldern (T[] in einer Message) erlaubt.");
+		}
+		var isStringField = type is PredefinedTypeSyntax { Keyword.Text: "string" };
+		// A string field in a Struct is rejected outright by ResolveScalarField (structs may only
+		// hold fixed-layout data) -- that check must win over "missing [BinaryMaxEncodedByteLength]"
+		// below, so a Struct-with-string schema still gets the (more actionable) "use a Class
+		// instead" error instead of a confusing demand for a bound on a field type that isn't even
+		// allowed here.
+		if (isStringField && ownerKind == OwnerKind.Struct)
+		{
+			return ResolveScalarField(name, description, type, ns, fieldLabel, ownerKind, 0);
+		}
+		if (maxLengthAttr is null && isStringField)
+		{
+			throw new SchemaException($"{fieldLabel}: string-Felder brauchen [BinaryMaxEncodedByteLength(N)] (bestimmt die maximale kodierte Laenge in Bytes, ohne das abschliessende NUL, fuer die generierte {{Message}}_MAX_SIZE-Konstante).");
+		}
+		if (maxLengthAttr is not null && !isStringField)
+		{
+			throw new SchemaException($"{fieldLabel}: [BinaryMaxEncodedByteLength] ist nur auf string-Feldern erlaubt.");
+		}
+		var maxLength = isStringField ? ReadMaxLength() : 0;
+		return ResolveScalarField(name, description, type, ns, fieldLabel, ownerKind, maxLength);
 	}
 
 	// Fixed/EnumRef/StructRef only -- for RepeatedField ([BinaryCount]) and UniformPackedArrayField
@@ -211,7 +251,7 @@ internal sealed class ParseContext(
 		};
 	}
 
-	private FieldBase ResolveScalarField(string name, string? description, TypeSyntax type, string ns, string fieldLabel, OwnerKind ownerKind)
+	private FieldBase ResolveScalarField(string name, string? description, TypeSyntax type, string ns, string fieldLabel, OwnerKind ownerKind, int maxLength)
 	{
 		if (type is PredefinedTypeSyntax pts)
 		{
@@ -221,7 +261,7 @@ internal sealed class ParseContext(
 				{
 					throw new SchemaException($"{fieldLabel}: \"string\" ist in einem Struct nicht erlaubt (nur feste Feldtypen) -- als Class deklarieren, wenn ein String benoetigt wird.");
 				}
-				return new StringField(name, description);
+				return new StringField(name, description, maxLength);
 			}
 			return MakeFixedField(name, description, pts.Keyword.Text, fieldLabel);
 		}
@@ -246,23 +286,35 @@ internal sealed class ParseContext(
 		}
 	}
 
-	private FieldBase ResolveMessageArrayField(string name, string? description, TypeSyntax elementType, string ns, string fieldLabel)
+	private FieldBase ResolveMessageArrayField(string name, string? description, TypeSyntax elementType, string ns, string fieldLabel, int maxCount, int? maxElementLength)
 	{
 		if (elementType is PredefinedTypeSyntax pts)
 		{
 			if (pts.Keyword.Text == "string")
 			{
-				return new UniformVariableArrayField(name, description);
+				if (maxElementLength is null)
+				{
+					throw new SchemaException($"{fieldLabel}: ein string[]-Feld braucht zusaetzlich [BinaryMaxEncodedByteLength(N)] (bestimmt die maximale kodierte Laenge JEDES Elements, [BinaryMaxItemCount] allein bestimmt nur die Elementanzahl).");
+				}
+				return new UniformVariableArrayField(name, description, maxCount, maxElementLength.Value);
 			}
-			return new UniformPackedArrayField(name, description, MakeFixedField(name, description, pts.Keyword.Text, fieldLabel));
+			if (maxElementLength is not null)
+			{
+				throw new SchemaException($"{fieldLabel}: [BinaryMaxEncodedByteLength] ist nur bei string[]-Elementen sinnvoll (dieses Element hat eine ohnehin feste Groesse).");
+			}
+			return new UniformPackedArrayField(name, description, MakeFixedField(name, description, pts.Keyword.Text, fieldLabel), maxCount);
 		}
 
 		var (kind, key) = ResolveNamedType(elementType, ns, fieldLabel);
+		if (maxElementLength is not null && kind != RefKind.Union)
+		{
+			throw new SchemaException($"{fieldLabel}: [BinaryMaxEncodedByteLength] ist nur bei string[]-Elementen sinnvoll (dieses Element hat eine ohnehin feste Groesse).");
+		}
 		return kind switch
 		{
-			RefKind.Enum => new UniformPackedArrayField(name, description, new EnumRefField(name, description, ResolveEnum(key, fieldLabel))),
-			RefKind.Struct => new UniformPackedArrayField(name, description, new StructRefField(name, description, ResolveStruct(key, fieldLabel))),
-			RefKind.Union => new PolymorphicArrayField(name, description, ResolveUnionVariants(key, fieldLabel)),
+			RefKind.Enum => new UniformPackedArrayField(name, description, new EnumRefField(name, description, ResolveEnum(key, fieldLabel)), maxCount),
+			RefKind.Struct => new UniformPackedArrayField(name, description, new StructRefField(name, description, ResolveStruct(key, fieldLabel)), maxCount),
+			RefKind.Union => new PolymorphicArrayField(name, description, ResolveUnionVariants(key, fieldLabel), maxCount),
 			RefKind.Class => throw new SchemaException($"{fieldLabel}: ein Array aus direkten Klassenreferenzen wird nicht unterstuetzt -- [BinaryUnion]-Interface verwenden (auch wenn nur eine Klasse implementiert)."),
 			_ => throw new SchemaException($"{fieldLabel}: unbekannter Element-Typ \"{elementType}\"."),
 		};

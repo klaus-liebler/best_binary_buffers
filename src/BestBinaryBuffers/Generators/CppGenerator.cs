@@ -407,6 +407,31 @@ public static class CppGenerator
 		}
 	}
 
+	// Worst-case encoded size of ONE field, using the schema's mandatory [BinaryMaxEncodedByteLength]/
+	// [BinaryMaxItemCount] bounds instead of a concrete payload's actual runtime lengths -- unlike
+	// EncodedSizeStatement below, this is a compile-time constant (see GenerateMessage's
+	// <Message>_MAX_SIZE). Mirrors EncodeField's actual byte layout field-by-field (count/length
+	// prefixes included) so the two can never silently drift apart.
+	private static int MaxSizeOf(FieldBase f) => f switch
+	{
+		FixedField ff => ff.Size,
+		EnumRefField erf => erf.Enum.Size,
+		StructRefField srf => srf.Struct.Fields.Sum(FixedSizeOf),
+		RepeatedField rf => ElementSize(rf.Element) * rf.Count,
+		StringField sf => sf.MaxLength + 1,
+		UniformPackedArrayField af => 2 + af.MaxCount * ElementSize(af.Element),
+		UniformVariableArrayField vf => 2 + vf.MaxCount * (vf.MaxElementLength + 1),
+		// 2-byte count prefix, then MaxCount elements each [2-byte classId][largest variant's own
+		// encoded size] -- mirrors Append<...>Element (classId) + <Variant>::Encode (class fields).
+		PolymorphicArrayField paf => 2 + paf.MaxCount * (2 + paf.Variants.Max(ClassMaxSize)),
+		// No count prefix (single element, unlike PolymorphicArrayField) -- just the largest
+		// variant's own [2-byte classId][class fields].
+		PolymorphicField pf => 2 + pf.Variants.Max(ClassMaxSize),
+		_ => throw new InvalidOperationException(),
+	};
+
+	private static int ClassMaxSize(ClassDef c) => c.Fields.Sum(MaxSizeOf);
+
 	// Best-effort minimum buffer size for Encode() given the CURRENTLY set string/array lengths in
 	// payload -- not a compile-time constant (depends on the actual call), built as statements (not a
 	// single expression) since string/array lengths need a small loop-free sum in the simple cases but a
@@ -626,6 +651,12 @@ public static class CppGenerator
 		foreach (var f in msg.Fields) sb.Append(EncodedSizeStatement(f));
 		sb.Append("    return total;\n");
 		sb.Append("}\n\n");
+
+		var maxSize = 4 + msg.Fields.Sum(MaxSizeOf);
+		sb.Append("// Groesste jemals moegliche Encode()-Groesse, aus den [BinaryMaxEncodedByteLength]/[BinaryMaxItemCount]-\n");
+		sb.Append("// Bounds im Schema hergeleitet (nicht vom Aufruf abhaengig, im Gegensatz zu EncodedSize()) --\n");
+		sb.Append("// zum Dimensionieren fest allozierter Puffer (statt Ratewerten).\n");
+		sb.Append($"constexpr size_t {msg.Name}_MAX_SIZE = {maxSize};\n\n");
 
 		sb.Append("// Schreibt Kopf+Payload nach 'dest' (s. EncodedSize() fuer die benoetigte Mindestgroesse).\n");
 		sb.Append("// Gibt die geschriebene Gesamtlaenge zurueck, oder 0 bei zu kleinem Zielpuffer.\n");

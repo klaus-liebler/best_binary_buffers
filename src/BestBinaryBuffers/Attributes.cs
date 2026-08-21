@@ -49,3 +49,27 @@ public sealed class BinaryCountAttribute(int count) : Attribute
 {
 	public int Count { get; } = count;
 }
+
+/// <summary>Upper bound (in encoded bytes, NOT counting the trailing NUL) on a variable-length
+/// `string` field. Required on every `string` field of a message -- without it the message's
+/// worst-case encoded size is unbounded and no `constexpr ..._MAX_SIZE` can be emitted for the C++
+/// side. Purely a codegen-time bound: values longer than this at runtime still encode/decode
+/// correctly (Encode()/Decode() themselves are unaffected), the bound only feeds the generated
+/// `_MAX_SIZE` constant -- exceeding it at runtime is the caller's responsibility to avoid.</summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class BinaryMaxEncodedByteLengthAttribute(int maxEncodedByteLength) : Attribute
+{
+	public int MaxEncodedByteLength { get; } = maxEncodedByteLength;
+}
+
+/// <summary>Upper bound on the element count of a variable-length (wire length-prefixed) array field
+/// on a `[BinaryMessage]` class -- i.e. a bare `T[]` field, as opposed to a `[BinaryCount(N)]`-fixed
+/// one. Required on every such array field for the same reason as
+/// <see cref="BinaryMaxEncodedByteLengthAttribute"/>: without a bound, no finite `_MAX_SIZE` is
+/// computable. For a polymorphic array (`T` implements a `[BinaryUnion]` interface), the per-element
+/// size used against this count is the largest variant's own encoded size.</summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class BinaryMaxItemCountAttribute(int maxItemCount) : Attribute
+{
+	public int MaxItemCount { get; } = maxItemCount;
+}

@@ -24,8 +24,12 @@ public sealed record EnumRefField(string Name, string? Description, EnumDef Enum
 
 public sealed record StructRefField(string Name, string? Description, StructDef Struct) : FieldBase(Name, Description);
 
-// Always null-terminated on the wire (UTF-8 bytes + 0x00) -- no length prefix.
-public sealed record StringField(string Name, string? Description) : FieldBase(Name, Description);
+// Always null-terminated on the wire (UTF-8 bytes + 0x00) -- no length prefix. MaxLength is the
+// [BinaryMaxEncodedByteLength]-declared upper bound in encoded bytes, NOT counting the trailing NUL --
+// mandatory (not merely advisory): it's the only thing that makes a message's/class's worst-case
+// encoded size finite, and CppGenerator's <Message>_MAX_SIZE computation depends on every
+// StringField carrying one (see SchemaValidation).
+public sealed record StringField(string Name, string? Description, int MaxLength) : FieldBase(Name, Description);
 
 // [BinaryCount(N)] on a Struct/Class field -- N identical fixed values back to back (a C array), e.g. a
 // 6-byte MAC address as "byte[] Mac" with [BinaryCount(6)] instead of 6 individually named fields.
@@ -36,13 +40,18 @@ public sealed record RepeatedField(string Name, string? Description, FieldBase E
 // is a FixedField/EnumRefField/StructRefField "prototype" describing the element's wire shape -- its own
 // Name is irrelevant, codegen always addresses "payload.<ArrayField.Name>[i]"). Self-terminating on
 // decode (exact byte length is computable from count*elementSize), so -- unlike PolymorphicArrayField --
-// it may appear anywhere in a message's field list, not just trailing.
-public sealed record UniformPackedArrayField(string Name, string? Description, FieldBase Element) : FieldBase(Name, Description);
+// it may appear anywhere in a message's field list, not just trailing. MaxCount is the mandatory
+// [BinaryMaxItemCount]-declared upper bound on element count (see StringField's MaxLength comment for why
+// it's mandatory, not advisory).
+public sealed record UniformPackedArrayField(string Name, string? Description, FieldBase Element, int MaxCount) : FieldBase(Name, Description);
 
 // Message-only. Count-prefixed (ushort) array of null-terminated strings. Each element is
 // self-terminating (scan for 0x00), so decoding the whole array is eager but still fully determines its
-// own byte length -- may appear anywhere in a message's field list, not just trailing.
-public sealed record UniformVariableArrayField(string Name, string? Description) : FieldBase(Name, Description);
+// own byte length -- may appear anywhere in a message's field list, not just trailing. MaxCount bounds
+// the array length ([BinaryMaxItemCount]), MaxElementLength bounds each string's encoded length
+// ([BinaryMaxEncodedByteLength], same unit/meaning as StringField.MaxLength) -- both mandatory, together they're
+// what makes this field's worst-case size finite.
+public sealed record UniformVariableArrayField(string Name, string? Description, int MaxCount, int MaxElementLength) : FieldBase(Name, Description);
 
 // Message/Class-only. Heterogeneous/polymorphic array: each element is one of several declared classes,
 // tagged with a 2-byte classId. Decoding a message's Data/Count is DEFERRED (top-level Decode() just
@@ -53,7 +62,10 @@ public sealed record UniformVariableArrayField(string Name, string? Description)
 // deliberate tightening vs. the JSON-schema generator this library replaces, which permitted several
 // consecutive trailing class-array fields but had a latent decode bug for exactly that case (the second
 // trailing field's Decode always read past a "pos" already forced to the frame's end).
-public sealed record PolymorphicArrayField(string Name, string? Description, IReadOnlyList<ClassDef> Variants) : FieldBase(Name, Description);
+// MaxCount ([BinaryMaxItemCount], mandatory) bounds the element count; the per-element size used
+// against it is the largest Variant's own (recursively computed) encoded size, no separate
+// attribute needed for that part.
+public sealed record PolymorphicArrayField(string Name, string? Description, IReadOnlyList<ClassDef> Variants, int MaxCount) : FieldBase(Name, Description);
 
 // Like PolymorphicArrayField, but a single element instead of a list (no count prefix) -- for fields
 // that are, at runtime, one of several classes without being a list (e.g. "one of three schedule

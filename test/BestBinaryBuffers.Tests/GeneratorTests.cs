@@ -58,6 +58,24 @@ public class GeneratorTests
 	}
 
 	[Fact]
+	public void MessageEmitsConstexprMaxSizeDerivedFromSchemaBounds()
+	{
+		using var schema = new TestSchema();
+		schema.AddFile(Fixtures.FullSchema);
+		var (cpp, _) = SchemaCompiler.Generate(schema.Files, new IdMap());
+
+		// ResponseStatus mixes every variable-length kind (StringField via requestId is fixed, but
+		// Waypoints/Tags/Commands are Uniform*/Polymorphic) -- MAX_SIZE must be a real constexpr,
+		// not the runtime-dependent EncodedSize(). Exact arithmetic (header 4 + requestId 2 +
+		// Timestamp 4 + Position 12 + Mood 1 + Address 6 + Waypoints (2+8*12) + Tags (2+4*16) +
+		// Commands (2+4*(2+64))) = 459, recomputed here so the test breaks loudly if the formula in
+		// CppGenerator.MaxSizeOf ever silently drifts from EncodeField's actual wire layout.
+		Assert.Contains("constexpr size_t ResponseStatus_MAX_SIZE = 459;", cpp);
+		// NotifyThing has just one bounded string (MaxLength 127) plus the 4-byte header.
+		Assert.Contains("constexpr size_t NotifyThing_MAX_SIZE = 132;", cpp);
+	}
+
+	[Fact]
 	public void RepeatedFieldEmbedsFixedSizeArrayWithoutWirePrefix()
 	{
 		using var schema = new TestSchema();
