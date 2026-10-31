@@ -513,7 +513,7 @@ public static class CppGenerator
 		foreach (var f in c.Fields) sb.Append(FieldDecl(f, c.Name));
 		sb.Append("};\n\n");
 
-		sb.Append("inline size_t Encode(const Payload& payload, uint8_t* dest, size_t pos, size_t dest_size) {\n");
+		sb.Append("inline size_t Encode([[maybe_unused]] const Payload& payload, uint8_t* dest, size_t pos, size_t dest_size) {\n");
 		foreach (var f in c.Fields) sb.Append(EncodeField(f));
 		sb.Append("    return pos;\n}\n\n");
 
@@ -646,7 +646,7 @@ public static class CppGenerator
 
 		sb.Append("// Minimal benoetigte Puffergroesse fuer Encode() bei den AKTUELL in payload gesetzten\n");
 		sb.Append("// String-/Array-Laengen (haengt vom jeweiligen Aufruf ab, keine Compile-Zeit-Konstante).\n");
-		sb.Append("inline size_t EncodedSize(const Payload& payload) {\n");
+		sb.Append("inline size_t EncodedSize([[maybe_unused]] const Payload& payload) {\n");
 		sb.Append("    size_t total = 4;\n");
 		foreach (var f in msg.Fields) sb.Append(EncodedSizeStatement(f));
 		sb.Append("    return total;\n");
@@ -660,7 +660,7 @@ public static class CppGenerator
 
 		sb.Append("// Schreibt Kopf+Payload nach 'dest' (s. EncodedSize() fuer die benoetigte Mindestgroesse).\n");
 		sb.Append("// Gibt die geschriebene Gesamtlaenge zurueck, oder 0 bei zu kleinem Zielpuffer.\n");
-		sb.Append("inline size_t Encode(const Payload& payload, uint8_t* dest, size_t dest_size) {\n");
+		sb.Append("inline size_t Encode([[maybe_unused]] const Payload& payload, uint8_t* dest, size_t dest_size) {\n");
 		sb.Append("    size_t pos = 0;\n");
 		sb.Append("    if (dest_size < 4) return 0;\n");
 		sb.Append("    dest[pos++] = (uint8_t)(NAMESPACE_ID & 0xFF); dest[pos++] = (uint8_t)(NAMESPACE_ID >> 8);\n");
