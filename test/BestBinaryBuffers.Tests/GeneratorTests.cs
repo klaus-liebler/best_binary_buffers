@@ -17,6 +17,40 @@ public class GeneratorTests
 	}
 
 	[Fact]
+	public void TsDecodeLocalsDoNotCollideWithFieldNames()
+	{
+		// A field named like a local of the generated decode() (its parameters view/offset, the Reader r)
+		// became a second "const" of the same name: "The symbol 'offset' has already been declared"
+		// (found with plc.UploadRequest.offset in the Factory Control Unit's schema).
+		using var schema = new TestSchema();
+		schema.AddFile("""
+			using BestBinaryBuffers;
+			namespace clash;
+			[BinaryType] public struct Pos { public uint r; public uint offset; }
+			[BinaryType] public class Item { public uint view; public uint r; }
+			[BinaryMessage(MessageKind.Request)]
+			public class Chunk { public uint offset; public uint view; public uint r; public Pos pos;
+				[BinaryMaxItemCount(4)] public byte[] data = System.Array.Empty<byte>(); }
+			""");
+		var (_, ts) = SchemaCompiler.Generate(schema.Files, new IdMap());
+
+		// every decode function: its parameters and its consts must be distinct names
+		var functions = System.Text.RegularExpressions.Regex.Matches(ts,
+			@"export function decode\w*\(([^)]*)\)[^{]*\{(.*?)\n\t*return \{", System.Text.RegularExpressions.RegexOptions.Singleline);
+		Assert.True(functions.Count >= 2, "the message's and the struct's decode functions");
+		foreach (System.Text.RegularExpressions.Match f in functions)
+		{
+			var locals = new HashSet<string>(f.Groups[1].Value.Split(',').Select(p => p.Split(':')[0].Trim()).Where(n => n.Length > 0));
+			var consts = System.Text.RegularExpressions.Regex.Matches(f.Groups[2].Value, @"^\t*const (\$?\w+)", System.Text.RegularExpressions.RegexOptions.Multiline);
+			foreach (System.Text.RegularExpressions.Match c in consts)
+			{
+				var head = f.Value.Split('\n')[0];
+				Assert.True(locals.Add(c.Groups[1].Value), $"'{c.Groups[1].Value}' declared twice in {head}");
+			}
+		}
+	}
+
+	[Fact]
 	public void StringFieldIsNullTerminatedNotLengthPrefixed()
 	{
 		using var schema = new TestSchema();

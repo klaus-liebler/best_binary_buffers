@@ -237,12 +237,12 @@ public static class TsGenerator
 
 	private static string DecodeFieldExpr(FieldBase f) => f switch
 	{
-		FixedField { Size: 8 } => "r.readUint64()",
-		FixedField ff when ff.IsBool => "r.readBool()",
-		FixedField ff when ff.IsSigned && !ff.IsFloat => $"r.{SignedReaderMethodName(ff.Size)}()",
-		FixedField ff => $"r.{ReaderMethodName(ff.Size, ff.IsFloat)}()",
-		EnumRefField erf => $"r.{ReaderMethodName(erf.Enum.Size, false)}() as {EnumTypeName(erf.Enum)}",
-		StructRefField srf => $"{Qualify(srf.Struct.Namespace, $"decode{srf.Struct.Name}")}(r)",
+		FixedField { Size: 8 } => "$r.readUint64()",
+		FixedField ff when ff.IsBool => "$r.readBool()",
+		FixedField ff when ff.IsSigned && !ff.IsFloat => $"$r.{SignedReaderMethodName(ff.Size)}()",
+		FixedField ff => $"$r.{ReaderMethodName(ff.Size, ff.IsFloat)}()",
+		EnumRefField erf => $"$r.{ReaderMethodName(erf.Enum.Size, false)}() as {EnumTypeName(erf.Enum)}",
+		StructRefField srf => $"{Qualify(srf.Struct.Namespace, $"decode{srf.Struct.Name}")}($r)",
 		_ => throw new InvalidOperationException(),
 	};
 
@@ -292,15 +292,15 @@ public static class TsGenerator
 		RepeatedField rf =>
 			$"\t\t\tconst {rf.Name}: {ElementTsType(rf.Element)}[] = [];\n" +
 			$"\t\t\tfor (let i = 0; i < {rf.Count}; i++) {rf.Name}.push({DecodeFieldExpr(rf.Element)});\n",
-		StringField sf => $"\t\t\tconst {sf.Name} = r.readCString();\n",
+		StringField sf => $"\t\t\tconst {sf.Name} = $r.readCString();\n",
 		UniformPackedArrayField af =>
-			$"\t\t\tconst {af.Name}Count = r.readUint16();\n" +
+			$"\t\t\tconst {af.Name}Count = $r.readUint16();\n" +
 			$"\t\t\tconst {af.Name}: {ElementTsType(af.Element)}[] = [];\n" +
 			$"\t\t\tfor (let i = 0; i < {af.Name}Count; i++) {af.Name}.push({DecodeFieldExpr(af.Element)});\n",
 		UniformVariableArrayField vf =>
-			$"\t\t\tconst {vf.Name}Count = r.readUint16();\n" +
+			$"\t\t\tconst {vf.Name}Count = $r.readUint16();\n" +
 			$"\t\t\tconst {vf.Name}: string[] = [];\n" +
-			$"\t\t\tfor (let i = 0; i < {vf.Name}Count; i++) {vf.Name}.push(r.readCString());\n",
+			$"\t\t\tfor (let i = 0; i < {vf.Name}Count; i++) {vf.Name}.push($r.readCString());\n",
 		PolymorphicArrayField paf => DecodeTaggedArray(paf.Name, paf.Variants, msgName),
 		PolymorphicField pf => DecodeTaggedSingle(pf.Name, pf.Variants, msgName),
 		_ => throw new InvalidOperationException(),
@@ -310,15 +310,15 @@ public static class TsGenerator
 	{
 		var unionType = PolymorphicUnionTypeName(variants);
 		var sb = new StringBuilder();
-		sb.Append($"\t\t\tconst {fieldName}Count = r.readUint16();\n");
+		sb.Append($"\t\t\tconst {fieldName}Count = $r.readUint16();\n");
 		sb.Append($"\t\t\tconst {fieldName}: {unionType}[] = [];\n");
 		sb.Append($"\t\t\tfor (let i = 0; i < {fieldName}Count; i++) {{\n");
-		sb.Append($"\t\t\t\tconst classId = r.readUint16();\n");
+		sb.Append($"\t\t\t\tconst classId = $r.readUint16();\n");
 		sb.Append("\t\t\t\tswitch (classId) {\n");
 		foreach (var v in variants)
 		{
 			var qv = ClassQualifiedName(v);
-			sb.Append($"\t\t\t\tcase {qv}.CLASS_ID: {fieldName}.push({{ classId, ...{qv}.decode(r) }}); break;\n");
+			sb.Append($"\t\t\t\tcase {qv}.CLASS_ID: {fieldName}.push({{ classId, ...{qv}.decode($r) }}); break;\n");
 		}
 		sb.Append($"\t\t\t\tdefault: throw new Error(\"{msgName}: unbekannte classId \" + classId + \" in {fieldName}\");\n");
 		sb.Append("\t\t\t\t}\n");
@@ -330,13 +330,13 @@ public static class TsGenerator
 	{
 		var unionType = PolymorphicUnionTypeName(variants);
 		var sb = new StringBuilder();
-		sb.Append($"\t\t\tconst {fieldName}ClassId = r.readUint16();\n");
+		sb.Append($"\t\t\tconst {fieldName}ClassId = $r.readUint16();\n");
 		sb.Append($"\t\t\tlet {fieldName}: {unionType};\n");
 		sb.Append($"\t\t\tswitch ({fieldName}ClassId) {{\n");
 		foreach (var v in variants)
 		{
 			var qv = ClassQualifiedName(v);
-			sb.Append($"\t\t\tcase {qv}.CLASS_ID: {fieldName} = {{ classId: {qv}.CLASS_ID, ...{qv}.decode(r) }}; break;\n");
+			sb.Append($"\t\t\tcase {qv}.CLASS_ID: {fieldName} = {{ classId: {qv}.CLASS_ID, ...{qv}.decode($r) }}; break;\n");
 		}
 		sb.Append($"\t\t\tdefault: throw new Error(\"{msgName}: unbekannte classId \" + {fieldName}ClassId + \" in {fieldName}\");\n");
 		sb.Append("\t\t\t}\n");
@@ -386,7 +386,7 @@ public static class TsGenerator
 		sb.Append($"{indent}export function encode{s.Name}(value: {s.Name}): Uint8Array {{\n");
 		sb.Append($"{indent}\tconst w = new Writer({totalSize});\n{indent}\tencode{s.Name}Into(value, w);\n{indent}\treturn w.finish();\n{indent}}}\n\n");
 
-		sb.Append($"{indent}export function decode{s.Name}(r: Reader): {s.Name} {{\n");
+		sb.Append($"{indent}export function decode{s.Name}($r: Reader): {s.Name} {{\n");
 		foreach (var f in s.Fields) sb.Append(DecodeFieldChunk(f, s.Name));
 		sb.Append("\t\treturn { " + string.Join(", ", s.Fields.Select(f => f.Name)) + " };\n\t}\n\n");
 
@@ -413,7 +413,7 @@ public static class TsGenerator
 		sb.Append("\t\texport function encode(payload: Payload): Uint8Array {\n");
 		sb.Append("\t\t\tconst w = new Writer();\n\t\t\tencodeInto(payload, w);\n\t\t\treturn w.finish();\n\t\t}\n\n");
 
-		sb.Append("\t\texport function decode(r: Reader): Payload {\n");
+		sb.Append("\t\texport function decode($r: Reader): Payload {\n");
 		foreach (var f in c.Fields) sb.Append(DecodeFieldChunk(f, c.Name));
 		sb.Append("\t\t\treturn { " + string.Join(", ", c.Fields.Select(f => f.Name)) + " };\n\t\t}\n");
 		sb.Append($"{indent}}}\n\n");
@@ -440,9 +440,10 @@ public static class TsGenerator
 		foreach (var f in msg.Fields) sb.Append(EncodeFieldChunk(f, "payload"));
 		sb.Append("\t\t\treturn w.finish();\n\t\t}\n\n");
 
-		sb.Append("\t\t// 'view'/'offset': kompletter Frame inkl. 4-Byte-Kopf / dessen Anfang. Wirft bei zu kurzem Frame.\n");
-		sb.Append("\t\texport function decode(view: DataView, offset: number): Payload {\n");
-		sb.Append("\t\t\tconst r = new Reader(view, offset + 4);\n");
+		sb.Append("\t\t// '$view'/'$offset': kompletter Frame inkl. 4-Byte-Kopf / dessen Anfang. Wirft bei zu kurzem Frame.\n");
+		// "$": the locals of decode() never collide with a field (a C# field name cannot contain "$")
+		sb.Append("\t\texport function decode($view: DataView, $offset: number): Payload {\n");
+		sb.Append("\t\t\tconst $r = new Reader($view, $offset + 4);\n");
 		foreach (var f in msg.Fields) sb.Append(DecodeFieldChunk(f, msg.Name));
 		sb.Append("\t\t\treturn { " + string.Join(", ", msg.Fields.Select(f => f.Name)) + " };\n\t\t}\n");
 		sb.Append($"{indent}}}\n\n");
