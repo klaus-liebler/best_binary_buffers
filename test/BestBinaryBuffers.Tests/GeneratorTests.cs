@@ -126,6 +126,116 @@ public class GeneratorTests
 	}
 
 	[Fact]
+	public void GeneratedCppResponderAnswersWithTheRequestsCorrelation()
+	{
+		// Compiles and runs a program against the generated header (host g++, as for the rtoos host tests):
+		// header layout, Responder::Send with the request's correlation, Dispatch's Malformed reply, no error
+		// reply without a correlation, events without a correlation.
+		using var schema = new TestSchema();
+		schema.AddFile(Fixtures.FullSchema);
+		var (cpp, _) = SchemaCompiler.Generate(schema.Files, new IdMap());
+		var dir = Directory.CreateTempSubdirectory("bbb_cpp_");
+		try
+		{
+			File.WriteAllText(Path.Combine(dir.FullName, "ws_protocol.hh"), cpp);
+			File.WriteAllText(Path.Combine(dir.FullName, "check.cpp"), """
+				#include "ws_protocol.hh"
+				#include <cstdio>
+				#include <vector>
+				using namespace WsProtocol;
+				struct Sent { int calls = 0; std::vector<uint8_t> bytes; };
+				static void collect(void* context, const uint8_t* data, size_t len) {
+				    auto* s = static_cast<Sent*>(context);
+				    ++s->calls;
+				    s->bytes.assign(data, data + len);
+				}
+				#define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); return 1; } } while (0)
+				int main() {
+				    uint8_t request[64];
+				    const size_t n = testns::RequestPing::Encode({}, request, sizeof request, 0x1234);
+				    CHECK(n == HEADER_SIZE);
+				    CHECK(request[4] == 0x34 && request[5] == 0x12 && request[6] == 0 && request[7] == 0);
+				    FrameHeader h{};
+				    CHECK(ReadHeader(request, n, h));
+				    CHECK(h.namespaceId == testns::NAMESPACE_ID && h.messageTypeId == testns::RequestPing::TYPE_ID);
+				    CHECK(CorrelationId(request, n) == 0x1234);
+
+				    uint8_t buffer[600];
+				    Sent sent;
+				    Responder responder(h, buffer, sizeof buffer, collect, &sent);
+				    bool handled = false;
+				    Dispatch(responder, request, n, testns::RequestPing::Decode, [&](Responder& r, const testns::RequestPing::Payload&) {
+				        handled = true;
+				        testns::ResponseStatus::Payload p{};
+				        p.timestamp = 7;
+				        r.Send(testns::ResponseStatus::Encode, p);
+				    });
+				    CHECK(handled && sent.calls == 1);
+				    FrameHeader a{};
+				    CHECK(ReadHeader(sent.bytes.data(), sent.bytes.size(), a));
+				    CHECK(a.messageTypeId == testns::ResponseStatus::TYPE_ID && a.correlationId == 0x1234 && a.flags == 0);
+				    testns::ResponseStatus::Payload back{};
+				    CHECK(testns::ResponseStatus::Decode(sent.bytes.data(), sent.bytes.size(), back) && back.timestamp == 7);
+
+				    // a frame that cannot be decoded: the handler is not called, the requester gets Malformed
+				    handled = false;
+				    Dispatch(responder, request, n, testns::ResponseStatus::Decode, [&](Responder&, const testns::ResponseStatus::Payload&) { handled = true; });
+				    CHECK(!handled && sent.calls == 2);
+				    CHECK(ReadHeader(sent.bytes.data(), sent.bytes.size(), a) && a.flags == FLAG_ERROR && a.correlationId == 0x1234);
+				    ErrorPayload e{};
+				    CHECK(DecodeError(sent.bytes.data(), sent.bytes.size(), e) && e.code == (uint16_t)ErrorCode::Malformed);
+
+				    // nobody waits (correlation 0): no error reply
+				    FrameHeader none = h;
+				    none.correlationId = 0;
+				    Responder quiet(none, buffer, sizeof buffer, collect, &sent);
+				    quiet.Error(ErrorCode::Busy, "later");
+				    CHECK(sent.calls == 2);
+
+				    // an event: correlation 0 unless given; a too small buffer gives len 0
+				    testns::NotifyThing::Payload ev{};
+				    ev.message = "hi";
+				    CHECK(CorrelationId(buffer, testns::NotifyThing::Encode(ev, buffer, sizeof buffer)) == 0);
+				    Responder tiny(h, buffer, 4, collect, &sent);
+				    tiny.Send(testns::ResponseStatus::Encode, back);
+				    CHECK(sent.calls == 3 && sent.bytes.empty());
+				    std::printf("OK\n");
+				    return 0;
+				}
+				""");
+			var gxx = Environment.GetEnvironmentVariable("BBB_TEST_GXX")
+				?? (File.Exists(@"C:\opt\msys64\ucrt64\bin\g++.exe") ? @"C:\opt\msys64\ucrt64\bin\g++.exe" : "g++");
+			Run(gxx, "-std=c++20 -Wall -Wextra -Werror -static -o check.exe check.cpp", dir.FullName, "compile");
+			var output = Run(Path.Combine(dir.FullName, "check.exe"), "", dir.FullName, "run");
+			Assert.Equal("OK", output.Trim());
+		}
+		finally
+		{
+			dir.Delete(recursive: true);
+		}
+	}
+
+	private static string Run(string exe, string args, string workDir, string what)
+	{
+		var psi = new System.Diagnostics.ProcessStartInfo(exe, args)
+		{
+			WorkingDirectory = workDir,
+			RedirectStandardOutput = true,
+			RedirectStandardError = true,
+		};
+		// MSYS2's g++ starts cc1plus/as/ld, which need the DLLs next to it
+		if (Path.GetDirectoryName(exe) is { Length: > 0 } binDir)
+		{
+			psi.Environment["PATH"] = binDir + Path.PathSeparator + Environment.GetEnvironmentVariable("PATH");
+		}
+		using var p = System.Diagnostics.Process.Start(psi) ?? throw new InvalidOperationException($"{exe} not found ({what})");
+		var output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+		p.WaitForExit();
+		Assert.True(p.ExitCode == 0, $"{what} failed: {output}");
+		return output;
+	}
+
+	[Fact]
 	public void GeneratedTsRoundTripsHeaderPayloadAndErrorReply()
 	{
 		// Runs the generated module with node (type stripping + transform for the namespaces): the wire

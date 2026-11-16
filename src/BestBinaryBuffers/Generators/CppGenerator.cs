@@ -139,6 +139,53 @@ public static class CppGenerator
 		    return true;
 		}
 
+		// The answer side of one received request: its header, a buffer for the answer and how to send it.
+		// A handler answers with Send() - the response carries the request's correlation - or Error(), and
+		// never deals with the frame header itself. The transport is the project's: 'send' gets the encoded
+		// frame, or len 0 if an answer did not fit 'buffer' (nothing to send; worth a log line).
+		class Responder {
+		public:
+		    using SendFn = void (*)(void* context, const uint8_t* data, size_t len);
+
+		    Responder(const FrameHeader& request, uint8_t* buffer, size_t size, SendFn send, void* context)
+		        : request_(request), buffer_(buffer), size_(size), send_(send), context_(context) {}
+
+		    const FrameHeader& Request() const { return request_; }
+
+		    // 'encode': the generated Encode() of the response message.
+		    template <class Encode, class Payload>
+		    void Send(Encode encode, const Payload& payload) {
+		        send_(context_, buffer_, encode(payload, buffer_, size_, request_.correlationId));
+		    }
+
+		    // A generic error reply (FLAG_ERROR) - only if the requester waits for an answer (correlationId != 0).
+		    void Error(ErrorCode code, const char* message) {
+		        if (request_.correlationId == 0) return;
+		        send_(context_, buffer_, EncodeError(request_, (uint16_t)code, message, buffer_, size_));
+		    }
+
+		private:
+		    FrameHeader request_;
+		    uint8_t* buffer_;
+		    size_t size_;
+		    SendFn send_;
+		    void* context_;
+		};
+
+		// Decodes the request in 'data' (the complete frame) with its generated Decode() and calls
+		// handler(responder, payload); a frame that cannot be decoded gets the error reply Malformed. The
+		// payload may point into 'data' (strings, arrays): valid during the call.
+		template <class Payload, class Handler>
+		void Dispatch(Responder& responder, const uint8_t* data, size_t len, bool (*decode)(const uint8_t*, size_t, Payload&),
+		              Handler&& handler) {
+		    Payload payload{};
+		    if (!decode(data, len, payload)) {
+		        responder.Error(ErrorCode::Malformed, "the frame could not be decoded");
+		        return;
+		    }
+		    handler(responder, payload);
+		}
+
 
 		""";
 
@@ -763,8 +810,10 @@ public static class CppGenerator
 		sb.Append("// 'data' is the COMPLETE frame including the header (namespaceId/messageTypeId are not checked\n");
 		sb.Append("// again here -- the job of the calling dispatcher). false for a frame that is too short or\n");
 		sb.Append("// inconsistent (e.g. a length prefix pointing beyond the end of the frame).\n");
-		sb.Append("inline bool Decode(const uint8_t* data, size_t len, Payload& out) {\n");
-		sb.Append("    size_t pos = HEADER_SIZE;\n");
+		// [[maybe_unused]]: a message without fields reads nothing after the header
+		sb.Append("inline bool Decode([[maybe_unused]] const uint8_t* data, size_t len, [[maybe_unused]] Payload& out) {\n");
+		sb.Append("    if (len < HEADER_SIZE) return false;\n");
+		sb.Append("    [[maybe_unused]] size_t pos = HEADER_SIZE;\n");
 		foreach (var f in msg.Fields) sb.Append(DecodeField(f));
 		sb.Append("    return true;\n}\n\n");
 

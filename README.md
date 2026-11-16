@@ -60,6 +60,34 @@ see above).
     `DecodeError`/`decodeError`. The
     other bits are reserved (0).
 
+## Answering requests (C++)
+
+Handlers should not deal with the header. The generated `Responder` holds the request's header, a
+buffer and the project's send function; `Dispatch()` decodes a request and calls the handler, or
+answers `Malformed`:
+
+```cpp
+void send_to_client(void* session, const uint8_t* data, size_t len);   // the project's transport
+
+void on_frame(Session& s, const uint8_t* data, size_t len) {
+    WsProtocol::FrameHeader h{};
+    if (!WsProtocol::ReadHeader(data, len, h)) return;
+    WsProtocol::Responder reply(h, buffer, sizeof buffer, send_to_client, &s);
+    switch (h.messageTypeId) {
+        case modbus::WriteHoldingRequest::TYPE_ID:
+            return WsProtocol::Dispatch(reply, data, len, modbus::WriteHoldingRequest::Decode, write_holding);
+        default: return reply.Error(WsProtocol::ErrorCode::UnknownMessage, "unknown message");
+    }
+}
+
+void write_holding(WsProtocol::Responder& reply, const modbus::WriteHoldingRequest::Payload& req) {
+    reply.Send(modbus::WriteHoldingResponse::Encode, {.success = write(req.address, req.value)});
+}
+```
+
+`Send()` puts the request's correlation into the response, `Error()` answers only if the requester
+waits (correlation != 0).
+
 A polymorphic field (`[BinaryUnion]`-typed, single or array) must be the very last field of its owner
 and there may be at most one per owner -- decoding it is deferred (the owner's `Decode()` just records
 the count/classId and jumps straight to the end of the frame; actual per-element decoding happens later,
