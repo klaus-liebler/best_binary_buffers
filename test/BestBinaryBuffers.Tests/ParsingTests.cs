@@ -34,7 +34,7 @@ public class ParsingTests
 	}
 
 	[Fact]
-	public void RequestAndResponseMessagesGetImplicitRequestIdFirst()
+	public void MessagesGetNoImplicitFields()
 	{
 		using var schema = new TestSchema();
 		schema.AddFile(Fixtures.FullSchema);
@@ -43,12 +43,12 @@ public class ParsingTests
 
 		var ping = ns.Messages.Single(m => m.Name == "RequestPing");
 		Assert.Equal(MessageKind.Request, ping.Kind);
-		var first = Assert.IsType<FixedField>(ping.Fields[0]);
-		Assert.Equal("requestId", first.Name);
+		// the correlation is in the frame header, no implicit payload field
+		Assert.Empty(ping.Fields);
 
 		var notify = ns.Messages.Single(m => m.Name == "NotifyThing");
 		Assert.Equal(MessageKind.Event, notify.Kind);
-		Assert.DoesNotContain(notify.Fields, f => f.Name == "requestId");
+		Assert.Single(notify.Fields);
 	}
 
 	[Fact]

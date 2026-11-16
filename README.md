@@ -30,7 +30,8 @@ Full rationale in the originating conversation (see the consuming project's hist
 - `[BinaryMessage(MessageKind.Event|Request|Response)]` on a `class` -- the wire-addressable root
   (namespace id + type id header). Only a message may contain a length-prefixed array field, and only
   one such array (or one trailing single polymorphic field), which must be the last field.
-  `Request`/`Response` messages get an implicit `requestId` (`ushort`) field as their first field.
+  The kind decides the generated `Encode()`/`encode()`: the correlation ID (see the header below) is a
+  required parameter for `Request`/`Response` messages and optional (0) for `Event` messages.
 - `[BinaryUnion]` on an `interface` -- marks it as a polymorphic discriminator; every `[BinaryType]`
   class implementing it becomes a tagged variant (2-byte classId).
 - Schema members are **public fields** (not properties). A `///` doc comment above a declaration/field
@@ -47,7 +48,16 @@ see above).
 - Message-level arrays (`T[]` fields without `[BinaryCount]`): `ushort` (2-byte) element count prefix.
 - `[BinaryCount(N)]` fields: N raw elements back to back, never wire-prefixed (size is schema-time only).
 - Polymorphic elements: 2-byte classId immediately before each element's own encoded bytes.
-- A message frame starts with a 4-byte header: `namespaceId:u16, messageTypeId:u16`.
+- A message frame starts with an 8-byte header (`HEADER_SIZE`):
+  `namespaceId:u16, messageTypeId:u16, correlationId:u16, flags:u16`.
+  - `correlationId`: chosen by the requester (non-zero), copied unchanged into the response, so a
+    client can match responses generically without knowing any payload. 0 = no correlation (events,
+    unsolicited pushes).
+  - `flags`: bit 0 `FLAG_ERROR` - a generic error reply to the request with that correlation ID; the
+    namespace/type are those of the request and the body is `code:u16` + a null-terminated message
+    (`ErrorCode`: UnknownMessage, Malformed, Busy, Failed; application codes from 0x100). Generated
+    helpers: `ReadHeader`/`readHeader`, `EncodeError`/`encodeError`, `DecodeError`/`decodeError`. The
+    other bits are reserved (0).
 
 A polymorphic field (`[BinaryUnion]`-typed, single or array) must be the very last field of its owner
 and there may be at most one per owner -- decoding it is deferred (the owner's `Decode()` just records

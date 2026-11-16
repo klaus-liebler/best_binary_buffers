@@ -212,6 +212,60 @@ public static class TsGenerator
 			return out;
 		}
 
+		// Every frame starts with this 8-byte header (little-endian): the message (namespace + type), the
+		// correlation of a request and its response, and flags.
+		export const HEADER_SIZE = 8;
+		// The frame is a generic error reply (body: code u16 + null-terminated message) to the request with
+		// this correlationId; namespaceId/messageTypeId are those of the request.
+		export const FLAG_ERROR = 0x0001;
+
+		export interface FrameHeader {
+			namespaceId: number;
+			messageTypeId: number;
+			// chosen by the requester (non-zero), copied unchanged into the response or error reply;
+			// 0 = no correlation (event, unsolicited push)
+			correlationId: number;
+			flags: number;
+		}
+
+		// Throws if the frame is shorter than the header.
+		export function readHeader(view: DataView, offset = 0): FrameHeader {
+			const r = new Reader(view, offset);
+			return { namespaceId: r.readUint16(), messageTypeId: r.readUint16(), correlationId: r.readUint16(), flags: r.readUint16() };
+		}
+
+		// Codes of an error reply; an application may define its own from Application on.
+		export const ErrorCode = {
+			UnknownMessage: 1, // namespace/type not handled by the receiver
+			Malformed: 2, // the frame could not be decoded
+			Busy: 3, // the request cannot be served now, try again later
+			Failed: 4, // the handler could not carry out the request (see the message)
+			Application: 0x100,
+		} as const;
+
+		export interface ErrorPayload {
+			code: number;
+			message: string;
+		}
+
+		// Error reply to 'request' (its namespace/type/correlation, FLAG_ERROR).
+		export function encodeError(request: FrameHeader, code: number, message: string): Uint8Array {
+			const w = new Writer();
+			w.writeUint16(request.namespaceId);
+			w.writeUint16(request.messageTypeId);
+			w.writeUint16(request.correlationId);
+			w.writeUint16(FLAG_ERROR);
+			w.writeUint16(code);
+			w.writeCString(message);
+			return w.finish();
+		}
+
+		// The body of a frame with FLAG_ERROR. Throws if it is too short.
+		export function decodeError(view: DataView, offset = 0): ErrorPayload {
+			const r = new Reader(view, offset + HEADER_SIZE);
+			return { code: r.readUint16(), message: r.readCString() };
+		}
+
 		""";
 
 	// --- Scalar field encode/decode (Fixed/EnumRef/StructRef), shared by EVERY context (struct field,
@@ -434,16 +488,24 @@ public static class TsGenerator
 		foreach (var f in msg.Fields) sb.Append(FieldDecl(f));
 		sb.Append("\t\t}\n\n");
 
-		sb.Append("\t\texport function encode(payload: Payload): Uint8Array {\n");
+		// Same rule as in C++: the correlation is required for requests and responses, optional for events.
+		// "$": the parameters and locals of encode()/decode() never collide with a field (a C# field name
+		// cannot contain "$").
+		var correlationParam = msg.Kind == MessageKind.Event ? "$correlationId = 0" : "$correlationId: number";
+		sb.Append("\t\t// $correlationId: for a response the one of the request (FrameHeader.correlationId), for a request\n");
+		sb.Append("\t\t// one chosen by the requester.\n");
+		sb.Append($"\t\texport function encode(payload: Payload, {correlationParam}): Uint8Array {{\n");
 		sb.Append("\t\t\tconst w = new Writer();\n");
-		sb.Append("\t\t\tw.writeUint16(NAMESPACE_ID);\n\t\t\tw.writeUint16(TYPE_ID);\n");
+		// NAMESPACE_ID qualified: it is declared in an earlier "export namespace" block of the same name,
+		// which not every transpiler resolves unqualified (tsc and esbuild do, node's type stripping not).
+		sb.Append($"\t\t\tw.writeUint16({Qualify(msg.Namespace, "NAMESPACE_ID")});\n\t\t\tw.writeUint16(TYPE_ID);\n");
+		sb.Append("\t\t\tw.writeUint16($correlationId);\n\t\t\tw.writeUint16(0);\n");
 		foreach (var f in msg.Fields) sb.Append(EncodeFieldChunk(f, "payload"));
 		sb.Append("\t\t\treturn w.finish();\n\t\t}\n\n");
 
-		sb.Append("\t\t// '$view'/'$offset': kompletter Frame inkl. 4-Byte-Kopf / dessen Anfang. Wirft bei zu kurzem Frame.\n");
-		// "$": the locals of decode() never collide with a field (a C# field name cannot contain "$")
+		sb.Append("\t\t// '$view'/'$offset': the complete frame including the header / its start. Throws if the frame is too short.\n");
 		sb.Append("\t\texport function decode($view: DataView, $offset: number): Payload {\n");
-		sb.Append("\t\t\tconst $r = new Reader($view, $offset + 4);\n");
+		sb.Append("\t\t\tconst $r = new Reader($view, $offset + HEADER_SIZE);\n");
 		foreach (var f in msg.Fields) sb.Append(DecodeFieldChunk(f, msg.Name));
 		sb.Append("\t\t\treturn { " + string.Join(", ", msg.Fields.Select(f => f.Name)) + " };\n\t\t}\n");
 		sb.Append($"{indent}}}\n\n");

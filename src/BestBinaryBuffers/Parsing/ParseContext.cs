@@ -118,15 +118,9 @@ internal sealed class ParseContext(
 
 	public Message ResolveMessage(string key, RawMessage raw)
 	{
+		// The correlation of a request and its response is part of the frame header (correlationId), not
+		// of the payload.
 		var fields = ResolveFields(raw.Syntax.Members, raw.Namespace, $"Message \"{key}\"", OwnerKind.Message);
-		if (raw.Kind is MessageKind.Request or MessageKind.Response)
-		{
-			// requestId (uint16) is an IMPLICIT first field right after the 4-byte header for
-			// request/response messages -- synthesized here instead of every request/response schema
-			// declaration having to list it itself.
-			var requestId = new FixedField("requestId", "Vom Client vergebene Korrelations-ID, in der Response unveraendert zurueckgegeben.", "uint16_t", "number", 2, false, false);
-			fields = [requestId, .. fields];
-		}
 		var id = Ids.GetOrAssignMessage(key);
 		return new Message(raw.Namespace, raw.Name, id, raw.Kind, raw.Description, fields);
 	}

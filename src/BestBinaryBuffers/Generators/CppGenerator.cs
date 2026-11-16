@@ -10,12 +10,16 @@ namespace BestBinaryBuffers.Generators;
 /// per-field Decode*Elements visitor helpers).</summary>
 public static class CppGenerator
 {
+	/// <summary>Frame header: namespaceId, messageTypeId, correlationId, flags (u16 each).</summary>
+	public const int HeaderSize = 8;
+
 	public static string Generate(IReadOnlyList<NamespaceDef> namespaces)
 	{
 		var sb = new StringBuilder();
 		sb.Append(GeneratedFileHeader.Text);
 		sb.Append("\n#pragma once\n#include <cstdint>\n#include <cstddef>\n#include <cstring>\n\nnamespace WsProtocol {\n\n");
 		sb.Append("enum class MessageKind : uint8_t { Event = 0, Request = 1, Response = 2 };\n\n");
+		sb.Append(FrameRuntime);
 
 		// Four phases instead of "everything in one pass per namespace": enums/structs must be fully
 		// declared before classes and messages (referenced there, possibly across namespaces), classes
@@ -52,6 +56,85 @@ public static class CppGenerator
 		sb.Append("} // namespace WsProtocol\n");
 		return sb.ToString();
 	}
+
+	// --- Frame header and error replies, emitted once per generated file -----------------------------
+
+	private const string FrameRuntime = """
+		// Every frame starts with this 8-byte header (little-endian): the message (namespace + type), the
+		// correlation of a request and its response, and flags.
+		constexpr size_t HEADER_SIZE = 8;
+		// The frame is a generic error reply (body: code u16 + null-terminated message) to the request with
+		// this correlationId; namespaceId/messageTypeId are those of the request.
+		constexpr uint16_t FLAG_ERROR = 0x0001;
+
+		struct FrameHeader {
+		    uint16_t namespaceId;
+		    uint16_t messageTypeId;
+		    // Chosen by the requester (non-zero), copied unchanged into the response or error reply;
+		    // 0 = no correlation (event, unsolicited push).
+		    uint16_t correlationId;
+		    uint16_t flags;
+		};
+
+		// false if the frame is shorter than the header.
+		inline bool ReadHeader(const uint8_t* data, size_t len, FrameHeader& out) {
+		    if (len < HEADER_SIZE) return false;
+		    out.namespaceId = (uint16_t)(data[0] | (data[1] << 8));
+		    out.messageTypeId = (uint16_t)(data[2] | (data[3] << 8));
+		    out.correlationId = (uint16_t)(data[4] | (data[5] << 8));
+		    out.flags = (uint16_t)(data[6] | (data[7] << 8));
+		    return true;
+		}
+
+		// 'dest' must have room for HEADER_SIZE bytes.
+		inline void WriteHeader(uint8_t* dest, uint16_t namespaceId, uint16_t messageTypeId, uint16_t correlationId, uint16_t flags) {
+		    dest[0] = (uint8_t)(namespaceId & 0xFF); dest[1] = (uint8_t)(namespaceId >> 8);
+		    dest[2] = (uint8_t)(messageTypeId & 0xFF); dest[3] = (uint8_t)(messageTypeId >> 8);
+		    dest[4] = (uint8_t)(correlationId & 0xFF); dest[5] = (uint8_t)(correlationId >> 8);
+		    dest[6] = (uint8_t)(flags & 0xFF); dest[7] = (uint8_t)(flags >> 8);
+		}
+
+		// Codes of an error reply; an application may define its own from APPLICATION on.
+		enum class ErrorCode : uint16_t {
+		    UnknownMessage = 1, // namespace/type not handled by the receiver
+		    Malformed = 2,      // the frame could not be decoded
+		    Busy = 3,           // the request cannot be served now, try again later
+		    Failed = 4,         // the handler could not carry out the request (see the message)
+		    Application = 0x100,
+		};
+
+		struct ErrorPayload {
+		    uint16_t code;
+		    const char* message; // points into the frame
+		};
+
+		// Error reply to 'request' (its namespace/type/correlation, FLAG_ERROR): code + message (truncated
+		// to fit). Returns the frame length, 0 if 'dest' is too small for even an empty message.
+		inline size_t EncodeError(const FrameHeader& request, uint16_t code, const char* message, uint8_t* dest, size_t dest_size) {
+		    if (dest_size < HEADER_SIZE + 3) return 0;
+		    WriteHeader(dest, request.namespaceId, request.messageTypeId, request.correlationId, FLAG_ERROR);
+		    size_t pos = HEADER_SIZE;
+		    dest[pos++] = (uint8_t)(code & 0xFF); dest[pos++] = (uint8_t)(code >> 8);
+		    size_t n = message != nullptr ? strlen(message) : 0;
+		    if (n > dest_size - pos - 1) n = dest_size - pos - 1;
+		    if (n > 0) memcpy(dest + pos, message, n);
+		    pos += n;
+		    dest[pos++] = 0;
+		    return pos;
+		}
+
+		// The body of a frame with FLAG_ERROR; false if it is too short or the message is not terminated.
+		inline bool DecodeError(const uint8_t* data, size_t len, ErrorPayload& out) {
+		    if (len < HEADER_SIZE + 3) return false;
+		    out.code = (uint16_t)(data[HEADER_SIZE] | (data[HEADER_SIZE + 1] << 8));
+		    const uint8_t* text = data + HEADER_SIZE + 2;
+		    if (memchr(text, 0, len - HEADER_SIZE - 2) == nullptr) return false;
+		    out.message = (const char*)text;
+		    return true;
+		}
+
+
+		""";
 
 	// --- Dependency ordering -------------------------------------------------------------------------
 
@@ -647,32 +730,35 @@ public static class CppGenerator
 		sb.Append("// Minimal benoetigte Puffergroesse fuer Encode() bei den AKTUELL in payload gesetzten\n");
 		sb.Append("// String-/Array-Laengen (haengt vom jeweiligen Aufruf ab, keine Compile-Zeit-Konstante).\n");
 		sb.Append("inline size_t EncodedSize([[maybe_unused]] const Payload& payload) {\n");
-		sb.Append("    size_t total = 4;\n");
+		sb.Append("    size_t total = HEADER_SIZE;\n");
 		foreach (var f in msg.Fields) sb.Append(EncodedSizeStatement(f));
 		sb.Append("    return total;\n");
 		sb.Append("}\n\n");
 
-		var maxSize = 4 + msg.Fields.Sum(MaxSizeOf);
+		var maxSize = HeaderSize + msg.Fields.Sum(MaxSizeOf);
 		sb.Append("// Groesste jemals moegliche Encode()-Groesse, aus den [BinaryMaxEncodedByteLength]/[BinaryMaxItemCount]-\n");
 		sb.Append("// Bounds im Schema hergeleitet (nicht vom Aufruf abhaengig, im Gegensatz zu EncodedSize()) --\n");
 		sb.Append("// zum Dimensionieren fest allozierter Puffer (statt Ratewerten).\n");
 		sb.Append($"constexpr size_t {msg.Name}_MAX_SIZE = {maxSize};\n\n");
 
-		sb.Append("// Schreibt Kopf+Payload nach 'dest' (s. EncodedSize() fuer die benoetigte Mindestgroesse).\n");
-		sb.Append("// Gibt die geschriebene Gesamtlaenge zurueck, oder 0 bei zu kleinem Zielpuffer.\n");
-		sb.Append("inline size_t Encode([[maybe_unused]] const Payload& payload, uint8_t* dest, size_t dest_size) {\n");
-		sb.Append("    size_t pos = 0;\n");
-		sb.Append("    if (dest_size < 4) return 0;\n");
-		sb.Append("    dest[pos++] = (uint8_t)(NAMESPACE_ID & 0xFF); dest[pos++] = (uint8_t)(NAMESPACE_ID >> 8);\n");
-		sb.Append("    dest[pos++] = (uint8_t)(TYPE_ID & 0xFF); dest[pos++] = (uint8_t)(TYPE_ID >> 8);\n");
+		// The correlation is a required parameter for requests and responses (a response that forgets the
+		// request's correlation does not compile), optional for events.
+		var correlationParam = msg.Kind == MessageKind.Event ? "uint16_t correlationId = 0" : "uint16_t correlationId";
+		sb.Append("// Writes header + payload to 'dest' (see EncodedSize() for the size needed). correlationId: for a\n");
+		sb.Append("// response the one of the request (FrameHeader::correlationId), for a request one chosen by the\n");
+		sb.Append("// requester. Returns the total length written, 0 if 'dest' is too small.\n");
+		sb.Append($"inline size_t Encode([[maybe_unused]] const Payload& payload, uint8_t* dest, size_t dest_size, {correlationParam}) {{\n");
+		sb.Append("    if (dest_size < HEADER_SIZE) return 0;\n");
+		sb.Append("    WriteHeader(dest, NAMESPACE_ID, TYPE_ID, correlationId, 0);\n");
+		sb.Append("    size_t pos = HEADER_SIZE;\n");
 		foreach (var f in msg.Fields) sb.Append(EncodeField(f));
 		sb.Append("    return pos;\n}\n\n");
 
-		sb.Append("// 'data' zeigt auf den KOMPLETTEN Frame inkl. 4-Byte-Kopf (namespaceId/messageTypeId werden\n");
-		sb.Append("// hier nicht erneut geprueft -- Aufgabe des aufrufenden Dispatchers). false bei zu kurzem\n");
-		sb.Append("// oder inkonsistentem Frame (z.B. Laengenpraefix zeigt ueber das Frame-Ende hinaus).\n");
+		sb.Append("// 'data' is the COMPLETE frame including the header (namespaceId/messageTypeId are not checked\n");
+		sb.Append("// again here -- the job of the calling dispatcher). false for a frame that is too short or\n");
+		sb.Append("// inconsistent (e.g. a length prefix pointing beyond the end of the frame).\n");
 		sb.Append("inline bool Decode(const uint8_t* data, size_t len, Payload& out) {\n");
-		sb.Append("    size_t pos = 4;\n");
+		sb.Append("    size_t pos = HEADER_SIZE;\n");
 		foreach (var f in msg.Fields) sb.Append(DecodeField(f));
 		sb.Append("    return true;\n}\n\n");
 

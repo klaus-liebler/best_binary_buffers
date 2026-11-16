@@ -98,15 +98,84 @@ public class GeneratorTests
 		schema.AddFile(Fixtures.FullSchema);
 		var (cpp, _) = SchemaCompiler.Generate(schema.Files, new IdMap());
 
-		// ResponseStatus mixes every variable-length kind (StringField via requestId is fixed, but
-		// Waypoints/Tags/Commands are Uniform*/Polymorphic) -- MAX_SIZE must be a real constexpr,
-		// not the runtime-dependent EncodedSize(). Exact arithmetic (header 4 + requestId 2 +
-		// Timestamp 4 + Position 12 + Mood 1 + Address 6 + Waypoints (2+8*12) + Tags (2+4*16) +
-		// Commands (2+4*(2+64))) = 459, recomputed here so the test breaks loudly if the formula in
-		// CppGenerator.MaxSizeOf ever silently drifts from EncodeField's actual wire layout.
-		Assert.Contains("constexpr size_t ResponseStatus_MAX_SIZE = 459;", cpp);
-		// NotifyThing has just one bounded string (MaxLength 127) plus the 4-byte header.
-		Assert.Contains("constexpr size_t NotifyThing_MAX_SIZE = 132;", cpp);
+		// ResponseStatus mixes every variable-length kind (Waypoints/Tags/Commands are
+		// Uniform*/Polymorphic) -- MAX_SIZE must be a real constexpr, not the runtime-dependent
+		// EncodedSize(). Exact arithmetic (header 8 + Timestamp 4 + Position 12 + Mood 1 + Address 6 +
+		// Waypoints (2+8*12) + Tags (2+4*16) + Commands (2+4*(2+64))) = 461, recomputed here so the test
+		// breaks loudly if the formula in CppGenerator.MaxSizeOf ever silently drifts from EncodeField's
+		// actual wire layout.
+		Assert.Contains("constexpr size_t ResponseStatus_MAX_SIZE = 461;", cpp);
+		// NotifyThing has just one bounded string (MaxLength 127) plus the 8-byte header.
+		Assert.Contains("constexpr size_t NotifyThing_MAX_SIZE = 136;", cpp);
+	}
+
+	[Fact]
+	public void CorrelationIsRequiredForRequestsAndResponsesOptionalForEvents()
+	{
+		using var schema = new TestSchema();
+		schema.AddFile(Fixtures.FullSchema);
+		var (cpp, ts) = SchemaCompiler.Generate(schema.Files, new IdMap());
+
+		// A response that forgets the correlation of its request must not compile: no default value.
+		Assert.Contains("inline size_t Encode([[maybe_unused]] const Payload& payload, uint8_t* dest, size_t dest_size, uint16_t correlationId) {", cpp);
+		Assert.Contains("inline size_t Encode([[maybe_unused]] const Payload& payload, uint8_t* dest, size_t dest_size, uint16_t correlationId = 0) {", cpp);
+		Assert.Contains("export function encode(payload: Payload, $correlationId: number): Uint8Array {", ts);
+		Assert.Contains("export function encode(payload: Payload, $correlationId = 0): Uint8Array {", ts);
+		Assert.DoesNotContain("requestId", cpp);
+		Assert.DoesNotContain("requestId", ts);
+	}
+
+	[Fact]
+	public void GeneratedTsRoundTripsHeaderPayloadAndErrorReply()
+	{
+		// Runs the generated module with node (type stripping + transform for the namespaces): the wire
+		// layout of the 8-byte header, the correlation, the payload and a generic error reply.
+		using var schema = new TestSchema();
+		schema.AddFile(Fixtures.FullSchema);
+		var (_, ts) = SchemaCompiler.Generate(schema.Files, new IdMap());
+		var dir = Directory.CreateTempSubdirectory("bbb_ts_");
+		try
+		{
+			File.WriteAllText(Path.Combine(dir.FullName, "ws-protocol.ts"), ts);
+			File.WriteAllText(Path.Combine(dir.FullName, "check.ts"), """
+				import { testns, readHeader, encodeError, decodeError, HEADER_SIZE, FLAG_ERROR, ErrorCode } from "./ws-protocol.ts";
+				const fail = (what: string) => { console.log("FAIL " + what); process.exit(1); };
+				const status = { timestamp: 7, position: { x: 1, y: 2, z: 3 }, mood: testns.Color.Blue, address: { bytes: [1, 2, 3, 4, 5, 6] },
+					waypoints: [{ x: 4, y: 5, z: 6 }], tags: ["a", "bc"], commands: [{ classId: testns.LightCommand.CLASS_ID, brightness: 9 }] };
+				const bytes = testns.ResponseStatus.encode(status, 0x1234);
+				const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+				const h = readHeader(view);
+				if (h.namespaceId !== testns.NAMESPACE_ID || h.messageTypeId !== testns.ResponseStatus.TYPE_ID) fail("ids");
+				if (h.correlationId !== 0x1234 || h.flags !== 0) fail("correlation/flags");
+				if (bytes[4] !== 0x34 || bytes[5] !== 0x12) fail("correlation little-endian at byte 4");
+				if (view.getUint32(HEADER_SIZE, true) !== 7) fail("payload starts after the 8-byte header");
+				const back = testns.ResponseStatus.decode(view, 0);
+				if (JSON.stringify(back) !== JSON.stringify(status)) fail("payload round trip " + JSON.stringify(back));
+				const ev = testns.NotifyThing.encode({ message: "hi" });
+				if (readHeader(new DataView(ev.buffer)).correlationId !== 0) fail("event without correlation");
+				const err = encodeError(h, ErrorCode.Busy, "later");
+				const ev2 = new DataView(err.buffer);
+				const eh = readHeader(ev2);
+				if (eh.flags !== FLAG_ERROR || eh.correlationId !== 0x1234 || eh.messageTypeId !== h.messageTypeId) fail("error header");
+				const e = decodeError(ev2);
+				if (e.code !== ErrorCode.Busy || e.message !== "later") fail("error body");
+				console.log("OK");
+				""");
+			var psi = new System.Diagnostics.ProcessStartInfo("node", "--experimental-transform-types --no-warnings check.ts")
+			{
+				WorkingDirectory = dir.FullName,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+			};
+			using var node = System.Diagnostics.Process.Start(psi) ?? throw new InvalidOperationException("node not found (needed for this test)");
+			var output = node.StandardOutput.ReadToEnd() + node.StandardError.ReadToEnd();
+			node.WaitForExit();
+			Assert.True(node.ExitCode == 0 && output.Trim() == "OK", output);
+		}
+		finally
+		{
+			dir.Delete(recursive: true);
+		}
 	}
 
 	[Fact]
