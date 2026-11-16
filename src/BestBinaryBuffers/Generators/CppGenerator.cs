@@ -86,6 +86,12 @@ public static class CppGenerator
 		    return true;
 		}
 
+		// The correlationId of a frame (0 if it is shorter than the header) - what a handler passes to the
+		// Encode() of its response.
+		inline uint16_t CorrelationId(const uint8_t* data, size_t len) {
+		    return len < HEADER_SIZE ? 0 : (uint16_t)(data[4] | (data[5] << 8));
+		}
+
 		// 'dest' must have room for HEADER_SIZE bytes.
 		inline void WriteHeader(uint8_t* dest, uint16_t namespaceId, uint16_t messageTypeId, uint16_t correlationId, uint16_t flags) {
 		    dest[0] = (uint8_t)(namespaceId & 0xFF); dest[1] = (uint8_t)(namespaceId >> 8);

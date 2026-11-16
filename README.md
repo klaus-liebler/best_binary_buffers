@@ -56,7 +56,8 @@ see above).
   - `flags`: bit 0 `FLAG_ERROR` - a generic error reply to the request with that correlation ID; the
     namespace/type are those of the request and the body is `code:u16` + a null-terminated message
     (`ErrorCode`: UnknownMessage, Malformed, Busy, Failed; application codes from 0x100). Generated
-    helpers: `ReadHeader`/`readHeader`, `EncodeError`/`encodeError`, `DecodeError`/`decodeError`. The
+    helpers: `ReadHeader`/`readHeader`, `CorrelationId` (C++), `EncodeError`/`encodeError`,
+    `DecodeError`/`decodeError`. The
     other bits are reserved (0).
 
 A polymorphic field (`[BinaryUnion]`-typed, single or array) must be the very last field of its owner
