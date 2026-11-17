@@ -258,6 +258,36 @@ public class RoundTripTests(ITestOutputHelper output)
 				Assert.Equal(cppHex, tsHex);
 				Assert.True(Run(exe, [tsHex], dir, out var crossOut), "C++ dekodiert TS-Bytes falsch:\n" + crossOut);
 			}
+
+			// C#-Encoder (Runtime.BinaryEncoder): dieselbe Nutzlast, gemischt aus Dictionaries (mit
+			// "$class") und anonymen Objekten -- muss byte-gleich mit TS sein, und C++ muss sie dekodieren.
+			var encoder = new Runtime.BinaryEncoder(SchemaCompiler.Parse(schema.Files, new IdMap()));
+			static Dictionary<string, object?> C(string cls, params (string k, object? v)[] fields)
+			{
+				var d = new Dictionary<string, object?> { [Runtime.BinaryEncoder.ClassKey] = cls };
+				foreach (var (k, v) in fields) d[k] = v;
+				return d;
+			}
+			var scene = new
+			{
+				Head = 0xA1B2C3D4u,
+				First = new object[] { C("Circle", ("R", 7)), C("Group", ("Tag", 9), ("Inner", C("Word", ("W", "hi"))), ("After", 0x1234)), C("Circle", ("R", 300)) },
+				Single = C("Dot", ("V", 42)),
+				Second = new object[]
+				{
+					C("Group", ("Tag", 1), ("Inner", C("Dot", ("V", 5))), ("After", 2)),
+					C("Pwm", ("Outputs", new[] { 16390, 7 }), ("Tags", new[] { "a", "bc" }), ("Parts", new object[] { C("Dot", ("V", 3)), C("Word", ("W", "x")) }), ("End", 0x5A)),
+				},
+				Tail = 0xBEEF,
+			};
+			var csHex = Convert.ToHexString(encoder.EncodeMessage("rt", "Scene", scene)).ToLowerInvariant();
+			output.WriteLine("C#:  " + csHex);
+			Assert.Equal(tsHex, csHex);
+			if (cppHex is not null)
+			{
+				Assert.True(Run(exe, [csHex], dir, out var csCrossOut), "C++ dekodiert C#-Bytes falsch:\n" + csCrossOut);
+			}
+			Assert.Throws<ArgumentException>(() => encoder.EncodeMessage("rt", "Scene", new { Head = 1, First = Array.Empty<object>(), Single = C("Circle", ("R", 1)), Second = Array.Empty<object>(), Tail = 1 }));
 		}
 		finally
 		{

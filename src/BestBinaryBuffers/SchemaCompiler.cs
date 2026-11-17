@@ -19,6 +19,13 @@ public static class SchemaCompiler
 		return (CppGenerator.Generate(namespaces), TsGenerator.Generate(namespaces));
 	}
 
+	/// <summary>Parses <paramref name="sourceFiles"/> into the resolved schema model only (no code
+	/// generation) -- e.g. for <see cref="Runtime.BinaryEncoder"/>. Assigns new ids into
+	/// <paramref name="idMap"/> exactly like <see cref="Generate"/>, so pass the same id map the code
+	/// generation uses.</summary>
+	public static IReadOnlyList<Model.NamespaceDef> Parse(IReadOnlyList<string> sourceFiles, IdMap idMap) =>
+		SchemaParser.Parse(sourceFiles, idMap);
+
 	/// <summary>Like <see cref="Generate"/>, but also writes the two results to
 	/// <paramref name="cppOutputFilePath"/>/<paramref name="tsOutputFilePath"/> (creating parent
 	/// directories as needed).</summary>
