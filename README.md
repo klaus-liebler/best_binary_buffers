@@ -25,12 +25,14 @@ Full rationale in the originating conversation (see the consuming project's hist
   - `struct`: **fixed-layout only** -- primitive/enum-ref/struct-ref fields, no `string`, no arrays
     (except `[BinaryCount(N)]`-repeated fixed fields, e.g. a 6-byte MAC as `[BinaryCount(6)] public
     byte[] Bytes;`, never wire-prefixed).
-  - `class`: like `struct`, plus `string` fields and single polymorphic fields (see `[BinaryUnion]`)
-    are allowed, anywhere and any number of them. Still no other length-prefixed arrays.
+  - `class`: like `struct`, plus `string` fields, single polymorphic fields (see `[BinaryUnion]`) and
+    length-prefixed arrays (`T[]` without `[BinaryCount]`, same kinds and bounds as in a message), anywhere
+    and any number of them. A class may not contain itself (directly or via other classes) through a
+    `[BinaryUnion]` field -- its maximum encoded size would be unbounded.
 - `[BinaryMessage(MessageKind.Event|Request|Response)]` on a `class` -- the wire-addressable root
-  (namespace id + type id header). Only a message may contain length-prefixed arrays (`T[]` without
+  (namespace id + type id header). Like a class, it may contain length-prefixed arrays (`T[]` without
   `[BinaryCount]`: fixed-size elements, strings or polymorphic elements) -- any number of them, at any
-  position.
+  position; each needs `[BinaryMaxItemCount(N)]`.
   The kind decides the generated `Encode()`/`encode()`: the correlation ID (see the header below) is a
   required parameter for `Request`/`Response` messages and optional (0) for `Event` messages.
 - `[BinaryUnion]` on an `interface` -- marks it as a polymorphic discriminator; every `[BinaryType]`

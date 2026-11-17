@@ -29,12 +29,41 @@ public class ValidationTests
 		""", "BinaryCount");
 
 	[Fact]
-	public void ArrayInClassIsRejected() => ExpectSchemaError("""
+	public void UnboundedArrayInClassIsRejected() => ExpectSchemaError("""
 		using BestBinaryBuffers;
 		namespace ns;
 		[BinaryType]
 		public class Bad { public int[] Values; }
-		""", "nur in einer Message erlaubt");
+		""", "[BinaryMaxItemCount");
+
+	// Variable arrays are allowed in classes (not only messages) since 2026-11-17.
+	[Fact]
+	public void BoundedArraysInClassAreAccepted() => ExpectValid("""
+		using BestBinaryBuffers;
+		namespace ns;
+		[BinaryUnion] public interface IU { }
+		[BinaryType] public class A : IU { public byte V; }
+		[BinaryUnion] public interface IOuter { }
+		[BinaryType]
+		public class Ok : IOuter
+		{
+			[BinaryMaxItemCount(8)] public ushort[] Outputs;
+			[BinaryMaxItemCount(4)] [BinaryMaxEncodedByteLength(7)] public string[] Tags;
+			[BinaryMaxItemCount(4)] public IU[] Parts;
+			public byte After;
+		}
+		""");
+
+	[Fact]
+	public void RecursiveClassViaUnionIsRejected() => ExpectSchemaError("""
+		using BestBinaryBuffers;
+		namespace ns;
+		[BinaryUnion] public interface IU { }
+		[BinaryType] public class Leaf : IU { public byte V; }
+		[BinaryType] public class Node : IU { [BinaryMaxItemCount(4)] public IU[] Children; }
+		[BinaryMessage(MessageKind.Event)]
+		public class Tree { public IU Root; }
+		""", "rekursive Klassen-Referenz");
 
 	private static void ExpectValid(string content)
 	{

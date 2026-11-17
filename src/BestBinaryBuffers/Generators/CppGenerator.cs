@@ -314,7 +314,7 @@ public static class CppGenerator
 	// --- Field declarations (Payload struct members) ------------------------------------------------
 
 	// ownerName is only used to spell out the correct helper function name in a couple of field
-	// comments (Struct/Class fields never contain a Uniform*/Polymorphic* array, so it's unused there).
+	// comments (Struct fields never contain a Uniform*/Polymorphic* array, so it's unused there).
 	private static string FieldDecl(FieldBase f, string ownerName = "") => f switch
 	{
 		FixedField ff => $"    {ff.CppType} {ff.Name};" + Comment(ff.Description) + "\n",
@@ -654,11 +654,14 @@ public static class CppGenerator
 	{
 		var sb = new StringBuilder();
 
-		// A class may itself carry a PolymorphicField -- needs the same Append*/
+		// A class may itself carry array and polymorphic fields -- needs the same ElementAt/Append*/
 		// Decode*Elements helpers as a message's polymorphic field. Emitted BEFORE "namespace
 		// {c.Name} {" opens (not nested under it): the identifiers already embed the owning class +
 		// field name for uniqueness (s. GenerateClassTaggedHelpers), so nesting them one level deeper
 		// would only add a qualification ("Namespace::ClassName::Helper") that callers don't need.
+		foreach (var af in c.Fields.OfType<UniformPackedArrayField>()) sb.Append(GenerateUniformPackedArrayHelpers(c.Name, af));
+		foreach (var vf in c.Fields.OfType<UniformVariableArrayField>()) sb.Append(GenerateUniformVariableArrayHelpers(c.Name, vf));
+		foreach (var paf in c.Fields.OfType<PolymorphicArrayField>()) sb.Append(GenerateClassTaggedHelpers(c.Name, paf.Name, paf.Variants));
 		foreach (var pf in c.Fields.OfType<PolymorphicField>()) sb.Append(GenerateClassTaggedHelpers(c.Name, pf.Name, pf.Variants));
 
 		if (c.Description is not null) sb.Append($"// {c.Description}\n");

@@ -15,6 +15,8 @@ public class RoundTripTests(ITestOutputHelper output)
 	// Polymorphe Felder NICHT am Ende und mehrfach, dazu eine Klasse (Group) mit eigenem polymorphem Feld
 	// mitten in ihren Feldern als Element einer polymorphen Liste -- genau die Faelle, die erst das
 	// Byte-Laengenpraefix ermoeglicht (vorher: Group verschluckte beim Dekodieren alle Folgeelemente).
+	// Pwm: eine Klasse mit allen drei Listenarten (feste Elementgroesse, Strings, polymorph) -- Listen in
+	// Klassen sind seit 2026-11-17 erlaubt.
 	private const string Schema = """
 		using BestBinaryBuffers;
 		namespace rt;
@@ -26,6 +28,13 @@ public class RoundTripTests(ITestOutputHelper output)
 		[BinaryUnion] public interface IShape { }
 		[BinaryType] public class Circle : IShape { public ushort R; }
 		[BinaryType] public class Group : IShape { public byte Tag; public IInner Inner; public ushort After; }
+		[BinaryType] public class Pwm : IShape
+		{
+			[BinaryMaxItemCount(8)] public ushort[] Outputs;
+			[BinaryMaxItemCount(4)] [BinaryMaxEncodedByteLength(7)] public string[] Tags;
+			[BinaryMaxItemCount(4)] public IInner[] Parts;
+			public byte End;
+		}
 
 		[BinaryMessage(MessageKind.Event)]
 		public class Scene
@@ -42,7 +51,7 @@ public class RoundTripTests(ITestOutputHelper output)
 	//   head 0xA1B2C3D4
 	//   first  [Circle(7), Group(9, Word("hi"), 0x1234), Circle(300)]
 	//   single Dot(42)
-	//   second [Group(1, Dot(5), 2)]
+	//   second [Group(1, Dot(5), 2), Pwm([16390, 7], ["a", "bc"], [Dot(3), Word("x")], 0x5A)]
 	//   tail 0xBEEF
 	private const string CppProgram = """
 		#include <cstdio>
@@ -57,7 +66,8 @@ public class RoundTripTests(ITestOutputHelper output)
 		#define CHECK(c) do { if (!(c)) { std::printf("FAIL %s:%d %s\n", __FILE__, __LINE__, #c); fails++; } } while (0)
 
 		static size_t encodeScene(uint8_t* out, size_t outSize) {
-		    static uint8_t inner1[32], inner2[32], first[128], single[16], second[64];
+		    static uint8_t inner1[32], inner2[32], first[128], single[16], second[128];
+		    static uint8_t outs[16], tags[16], parts[32];
 		    size_t n1 = rt::AppendGroupInnerWordElement(rt::Word::Payload{"hi"}, inner1, 0, sizeof inner1);
 		    size_t n2 = rt::AppendGroupInnerDotElement(rt::Dot::Payload{5}, inner2, 0, sizeof inner2);
 		    size_t p = 0;
@@ -67,7 +77,15 @@ public class RoundTripTests(ITestOutputHelper output)
 		    size_t firstSize = p;
 		    size_t singleSize = rt::AppendSceneSingleDotElement(rt::Dot::Payload{42}, single, 0, sizeof single);
 		    size_t secondSize = rt::AppendSceneSecondGroupElement(rt::Group::Payload{1, inner2, n2, 2}, second, 0, sizeof second);
-		    rt::Scene::Payload s{0xA1B2C3D4u, first, 3, firstSize, single, singleSize, second, 1, secondSize, 0xBEEF};
+		    const uint16_t outValues[] = {16390, 7};
+		    for (size_t i = 0; i < 2; i++)
+		        rt::EncodePwmOutputsElement(outValues[i], outs + i * rt::PwmOutputs_ELEMENT_SIZE, sizeof outs - i * rt::PwmOutputs_ELEMENT_SIZE);
+		    std::memcpy(tags, "a\0bc\0", 5);
+		    size_t pp = rt::AppendPwmPartsDotElement(rt::Dot::Payload{3}, parts, 0, sizeof parts);
+		    pp = rt::AppendPwmPartsWordElement(rt::Word::Payload{"x"}, parts, pp, sizeof parts);
+		    rt::Pwm::Payload pwm{outs, 2, tags, 2, 5, parts, 2, pp, 0x5A};
+		    secondSize = rt::AppendSceneSecondPwmElement(pwm, second, secondSize, sizeof second);
+		    rt::Scene::Payload s{0xA1B2C3D4u, first, 3, firstSize, single, singleSize, second, 2, secondSize, 0xBEEF};
 		    size_t len = rt::Scene::Encode(s, out, outSize);
 		    CHECK(len == rt::Scene::EncodedSize(s));
 		    CHECK(len <= rt::Scene::Scene_MAX_SIZE);
@@ -80,12 +98,14 @@ public class RoundTripTests(ITestOutputHelper output)
 		    CHECK(s.head == 0xA1B2C3D4u);
 		    CHECK(s.tail == 0xBEEF); // nur korrekt, wenn alle polymorphen Felder davor sauber uebersprungen wurden
 		    CHECK(s.firstCount == 3);
-		    CHECK(s.secondCount == 1);
+		    CHECK(s.secondCount == 2);
 		    std::string firstSeen;
 		    CHECK(rt::DecodeSceneFirstElements(s.firstData, s.firstDataSize, s.firstCount, [&](const auto& item) {
 		        using T = std::decay_t<decltype(item)>;
 		        if constexpr (std::is_same_v<T, rt::Circle::Payload>) {
 		            firstSeen += "C" + std::to_string(item.r);
+		        } else if constexpr (std::is_same_v<T, rt::Pwm::Payload>) {
+		            firstSeen += "P";
 		        } else {
 		            firstSeen += "G" + std::to_string(item.tag) + "/" + std::to_string(item.after);
 		            CHECK(rt::DecodeGroupInnerElements(item.innerData, item.innerDataSize, 1, [&](const auto& in) {
@@ -113,11 +133,27 @@ public class RoundTripTests(ITestOutputHelper output)
 		                if constexpr (std::is_same_v<I, rt::Dot::Payload>) secondSeen += "D" + std::to_string(in.v);
 		                else secondSeen += "W";
 		            }));
+		        } else if constexpr (std::is_same_v<T, rt::Pwm::Payload>) {
+		            secondSeen += "P";
+		            for (size_t i = 0; i < item.outputsCount; i++) {
+		                uint16_t v{};
+		                CHECK(rt::DecodePwmOutputsElementAt(item.outputsData, i, v));
+		                secondSeen += std::to_string(v) + ",";
+		            }
+		            secondSeen += "|";
+		            CHECK(rt::DecodePwmTagsElements(item.tagsData, item.tagsDataSize, item.tagsCount, [&](const char* t) { secondSeen += std::string(t) + ","; }));
+		            secondSeen += "|";
+		            CHECK(rt::DecodePwmPartsElements(item.partsData, item.partsDataSize, item.partsCount, [&](const auto& in) {
+		                using I = std::decay_t<decltype(in)>;
+		                if constexpr (std::is_same_v<I, rt::Dot::Payload>) secondSeen += "D" + std::to_string(in.v);
+		                else secondSeen += std::string("W") + in.w;
+		            }));
+		            secondSeen += "|" + std::to_string(item.end);
 		        } else {
 		            secondSeen += "C";
 		        }
 		    }));
-		    CHECK(secondSeen == "G1/2D5");
+		    CHECK(secondSeen == "G1/2D5P16390,7,|a,bc,|D3Wx|90");
 		    // Laengenpraefix muss zum Inhalt passen: eine Liste mit zu grossem Byte-Bereich wird abgelehnt
 		    CHECK(!rt::DecodeSceneFirstElements(s.firstData, s.firstDataSize + 1, s.firstCount, [](const auto&) {}));
 		}
@@ -153,7 +189,11 @@ public class RoundTripTests(ITestOutputHelper output)
 				{ classId: rt.Circle.CLASS_ID, r: 300 },
 			],
 			single: { classId: rt.Dot.CLASS_ID, v: 42 },
-			second: [{ classId: rt.Group.CLASS_ID, tag: 1, inner: { classId: rt.Dot.CLASS_ID, v: 5 }, after: 2 }],
+			second: [
+				{ classId: rt.Group.CLASS_ID, tag: 1, inner: { classId: rt.Dot.CLASS_ID, v: 5 }, after: 2 },
+				{ classId: rt.Pwm.CLASS_ID, outputs: [16390, 7], tags: ["a", "bc"],
+				  parts: [{ classId: rt.Dot.CLASS_ID, v: 3 }, { classId: rt.Word.CLASS_ID, w: "x" }], end: 0x5A },
+			],
 			tail: 0xBEEF,
 		};
 		const hex = (b: Uint8Array) => Array.from(b, x => x.toString(16).padStart(2, "0")).join("");

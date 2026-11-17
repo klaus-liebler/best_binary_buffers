@@ -25,6 +25,7 @@ internal sealed class ParseContext(
 	private readonly Dictionary<string, StructDef> structCache = new(StringComparer.Ordinal);
 	private readonly Dictionary<string, ClassDef> classCache = new(StringComparer.Ordinal);
 	private readonly HashSet<string> structsBeingResolved = new(StringComparer.Ordinal);
+	private readonly HashSet<string> classesBeingResolved = new(StringComparer.Ordinal);
 
 	private static readonly Dictionary<string, (string Cpp, string Ts, int Size, bool IsBool, bool IsSigned, bool IsFloat)> PrimitiveTypes = new()
 	{
@@ -100,7 +101,15 @@ internal sealed class ParseContext(
 		{
 			throw new SchemaException($"{usedFrom}: unbekannte Klasse \"{key}\" -- ist sie mit [BinaryType] in einer der eingelesenen Schema-Dateien deklariert?");
 		}
+		// A class that (directly or via other classes) contains a [BinaryUnion] field one of whose
+		// variants is the class itself: unbounded encoded size (no finite <Message>_MAX_SIZE) and,
+		// without this check, endless recursion right here.
+		if (!classesBeingResolved.Add(key))
+		{
+			throw new SchemaException($"{usedFrom}: rekursive Klassen-Referenz ueber \"{key}\" -- eine Klasse enthaelt sich (ueber ein [BinaryUnion]-Feld) selbst; nicht unterstuetzt, die maximale kodierte Groesse waere unbegrenzt.");
+		}
 		var fields = ResolveFields(raw.Syntax.Members, raw.Namespace, $"Klasse \"{key}\"", OwnerKind.Class);
+		classesBeingResolved.Remove(key);
 		var id = Ids.GetOrAssignClass(key);
 		var def = new ClassDef(raw.Namespace, raw.Name, raw.Description, fields, id);
 		classCache[key] = def;
@@ -179,9 +188,12 @@ internal sealed class ParseContext(
 				var element = ResolveScalarElement(elementType, ns, fieldLabel);
 				return new RepeatedField(name, description, element, count);
 			}
-			if (ownerKind != OwnerKind.Message)
+			// Variable arrays (count-prefixed; polymorphic ones additionally byte-length-prefixed) are
+			// self-delimiting on the wire, so they work in Messages and Classes alike. Structs stay
+			// fixed-layout only.
+			if (ownerKind == OwnerKind.Struct)
 			{
-				throw new SchemaException($"{fieldLabel}: Arrays ohne [BinaryCount] sind nur in einer Message erlaubt -- in Struct/Class braucht ein Array-Feld [BinaryCount(N)].");
+				throw new SchemaException($"{fieldLabel}: Arrays ohne [BinaryCount] sind nur in einer Message oder Class erlaubt -- in einem Struct braucht ein Array-Feld [BinaryCount(N)].");
 			}
 			if (maxCountAttr is null)
 			{
@@ -198,7 +210,7 @@ internal sealed class ParseContext(
 		}
 		if (maxCountAttr is not null)
 		{
-			throw new SchemaException($"{fieldLabel}: [BinaryMaxItemCount] ist nur auf variablen Array-Feldern (T[] in einer Message) erlaubt.");
+			throw new SchemaException($"{fieldLabel}: [BinaryMaxItemCount] ist nur auf variablen Array-Feldern (T[] in einer Message oder Class) erlaubt.");
 		}
 		var isStringField = type is PredefinedTypeSyntax { Keyword.Text: "string" };
 		// A string field in a Struct is rejected outright by ResolveScalarField (structs may only
