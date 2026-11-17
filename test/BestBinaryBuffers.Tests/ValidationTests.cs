@@ -36,33 +36,44 @@ public class ValidationTests
 		public class Bad { public int[] Values; }
 		""", "nur in einer Message erlaubt");
 
+	private static void ExpectValid(string content)
+	{
+		using var schema = new TestSchema();
+		schema.AddFile(content);
+		SchemaParser.Parse(schema.Files, new IdMap());
+	}
+
+	// Polymorphic fields carry a byte-length prefix, so -- unlike before -- they may appear anywhere
+	// and more than once per owner (s. SchemaValidation).
 	[Fact]
-	public void PolymorphicFieldNotLastIsRejected() => ExpectSchemaError("""
+	public void PolymorphicFieldFollowedByOtherFieldsIsAccepted() => ExpectValid("""
 		using BestBinaryBuffers;
 		namespace ns;
 		[BinaryUnion] public interface IU { }
 		[BinaryType] public class A : IU { public byte V; }
 		[BinaryMessage(MessageKind.Event)]
-		public class Bad
+		public class Ok
 		{
 			public IU Choice;
-			public int TooLate;
+			public int After;
 		}
-		""", "muss das letzte Feld sein");
+		""");
 
 	[Fact]
-	public void TwoPolymorphicFieldsAreRejected() => ExpectSchemaError("""
+	public void SeveralPolymorphicFieldsAreAccepted() => ExpectValid("""
 		using BestBinaryBuffers;
 		namespace ns;
 		[BinaryUnion] public interface IU { }
 		[BinaryType] public class A : IU { public byte V; }
+		[BinaryType] public class Holder { public IU Inner; public ushort After; }
 		[BinaryMessage(MessageKind.Event)]
-		public class Bad
+		public class Ok
 		{
 			public IU First;
+			[BinaryMaxItemCount(4)] public IU[] Many;
 			public IU Second;
 		}
-		""", "nur eines pro Typ geben");
+		""");
 
 	[Fact]
 	public void UnknownTypeReferenceIsRejected() => ExpectSchemaError("""

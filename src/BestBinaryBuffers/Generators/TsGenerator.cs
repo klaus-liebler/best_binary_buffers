@@ -168,6 +168,10 @@ public static class TsGenerator
 				this.view.setUint8(this.pos, 0);
 				this.pos += 1;
 			}
+			// Byte-length prefix (u32) of a polymorphic field: reserve it, encode the content, then patch
+			// in the number of bytes written since.
+			beginLength(): number { this.ensure(4); const at = this.pos; this.pos += 4; return at; }
+			endLength(at: number): void { this.view.setUint32(at, this.pos - at - 4, true); }
 			finish(): Uint8Array { return this.bytes.slice(0, this.pos); }
 		}
 
@@ -176,6 +180,11 @@ public static class TsGenerator
 			constructor(private view: DataView, offset = 0) { this.pos = offset; }
 			private ensure(n: number): void {
 				if (this.pos + n > this.view.byteLength) throw new Error("frame too short");
+			}
+			// Byte-length prefix (u32) of a polymorphic field: returns the position where the content ends.
+			beginLength(): number { const len = this.readUint32(); this.ensure(len); return this.pos + len; }
+			endLength(end: number, what: string): void {
+				if (this.pos !== end) throw new Error(what + ": Inhalt passt nicht zum Laengenpraefix");
 			}
 			readUint8(): number { this.ensure(1); const v = this.view.getUint8(this.pos); this.pos += 1; return v; }
 			readInt8(): number { this.ensure(1); const v = this.view.getInt8(this.pos); this.pos += 1; return v; }
@@ -316,12 +325,22 @@ public static class TsGenerator
 		UniformVariableArrayField vf =>
 			$"\t\t\tw.writeUint16({varName}.{vf.Name}.length);\n" +
 			$"\t\t\tfor (const s of {varName}.{vf.Name}) w.writeCString(s);\n",
+		// [count:u16][byteLength:u32][elements] / [byteLength:u32][classId:u16][fields]
 		PolymorphicArrayField paf =>
 			$"\t\t\tw.writeUint16({varName}.{paf.Name}.length);\n" +
-			$"\t\t\tfor (const item of {varName}.{paf.Name}) {{\n" +
-			Reindent(EncodeTaggedElement("item", paf.Variants), "\t\t\t\t") +
+			"\t\t\t{\n" +
+			"\t\t\t\tconst lengthAt = w.beginLength();\n" +
+			$"\t\t\t\tfor (const item of {varName}.{paf.Name}) {{\n" +
+			Reindent(EncodeTaggedElement("item", paf.Variants), "\t\t\t\t\t") +
+			"\t\t\t\t}\n" +
+			"\t\t\t\tw.endLength(lengthAt);\n" +
 			"\t\t\t}\n",
-		PolymorphicField pf => EncodeTaggedElement($"{varName}.{pf.Name}", pf.Variants),
+		PolymorphicField pf =>
+			"\t\t\t{\n" +
+			"\t\t\t\tconst lengthAt = w.beginLength();\n" +
+			Reindent(EncodeTaggedElement($"{varName}.{pf.Name}", pf.Variants), "\t\t\t\t") +
+			"\t\t\t\tw.endLength(lengthAt);\n" +
+			"\t\t\t}\n",
 		_ => throw new InvalidOperationException(),
 	};
 
@@ -365,6 +384,7 @@ public static class TsGenerator
 		var unionType = PolymorphicUnionTypeName(variants);
 		var sb = new StringBuilder();
 		sb.Append($"\t\t\tconst {fieldName}Count = $r.readUint16();\n");
+		sb.Append($"\t\t\tconst {fieldName}End = $r.beginLength();\n");
 		sb.Append($"\t\t\tconst {fieldName}: {unionType}[] = [];\n");
 		sb.Append($"\t\t\tfor (let i = 0; i < {fieldName}Count; i++) {{\n");
 		sb.Append($"\t\t\t\tconst classId = $r.readUint16();\n");
@@ -377,6 +397,7 @@ public static class TsGenerator
 		sb.Append($"\t\t\t\tdefault: throw new Error(\"{msgName}: unbekannte classId \" + classId + \" in {fieldName}\");\n");
 		sb.Append("\t\t\t\t}\n");
 		sb.Append("\t\t\t}\n");
+		sb.Append($"\t\t\t$r.endLength({fieldName}End, \"{msgName}.{fieldName}\");\n");
 		return sb.ToString();
 	}
 
@@ -384,6 +405,7 @@ public static class TsGenerator
 	{
 		var unionType = PolymorphicUnionTypeName(variants);
 		var sb = new StringBuilder();
+		sb.Append($"\t\t\tconst {fieldName}End = $r.beginLength();\n");
 		sb.Append($"\t\t\tconst {fieldName}ClassId = $r.readUint16();\n");
 		sb.Append($"\t\t\tlet {fieldName}: {unionType};\n");
 		sb.Append($"\t\t\tswitch ({fieldName}ClassId) {{\n");
@@ -394,6 +416,7 @@ public static class TsGenerator
 		}
 		sb.Append($"\t\t\tdefault: throw new Error(\"{msgName}: unbekannte classId \" + {fieldName}ClassId + \" in {fieldName}\");\n");
 		sb.Append("\t\t\t}\n");
+		sb.Append($"\t\t\t$r.endLength({fieldName}End, \"{msgName}.{fieldName}\");\n");
 		return sb.ToString();
 	}
 

@@ -448,16 +448,20 @@ public static class CppGenerator
 					$"    if (payload.{vf.Name}DataSize > 0) {{ memcpy(dest + pos, payload.{vf.Name}Data, payload.{vf.Name}DataSize); pos += payload.{vf.Name}DataSize; }}\n";
 			case PolymorphicArrayField paf:
 				// Elements are already pre-serialized (classId + class fields each), see
-				// Append<Owner><Field><Class>Element() helpers. Must be the last field (see
-				// SchemaValidation) -- decode below intentionally jumps straight to the frame end.
+				// Append<Owner><Field><Class>Element() helpers. Wire: [count:u16][byteLength:u32][elements]
+				// -- the byte length lets the decoder skip the elements without decoding them, so the
+				// field may appear anywhere in its owner (s. SchemaValidation).
 				return
-					$"    if (pos + 2 + payload.{paf.Name}DataSize > dest_size) return 0;\n" +
+					$"    if (pos + 6 + payload.{paf.Name}DataSize > dest_size) return 0;\n" +
 					$"    dest[pos++] = (uint8_t)((uint16_t)payload.{paf.Name}Count >> 0); dest[pos++] = (uint8_t)((uint16_t)payload.{paf.Name}Count >> 8);\n" +
+					WriteU32($"payload.{paf.Name}DataSize") +
 					$"    if (payload.{paf.Name}DataSize > 0) {{ memcpy(dest + pos, payload.{paf.Name}Data, payload.{paf.Name}DataSize); pos += payload.{paf.Name}DataSize; }}\n";
 			case PolymorphicField pf:
 				// Like PolymorphicArrayField, but no count prefix -- exactly one pre-serialized element.
+				// Wire: [byteLength:u32][classId:u16][class fields].
 				return
-					$"    if (pos + payload.{pf.Name}DataSize > dest_size) return 0;\n" +
+					$"    if (pos + 4 + payload.{pf.Name}DataSize > dest_size) return 0;\n" +
+					WriteU32($"payload.{pf.Name}DataSize") +
 					$"    if (payload.{pf.Name}DataSize > 0) {{ memcpy(dest + pos, payload.{pf.Name}Data, payload.{pf.Name}DataSize); pos += payload.{pf.Name}DataSize; }}\n";
 			default:
 				throw new InvalidOperationException();
@@ -523,21 +527,32 @@ public static class CppGenerator
 					$"        out.{vf.Name}DataSize = pos - {vf.Name}Start_;\n" +
 					"    }\n";
 			case PolymorphicArrayField paf:
+				// Deferred: only count, start and byte length are recorded here; the elements are decoded
+				// later by Decode<Owner><Field>Elements(). Thanks to the byte length the cursor can skip
+				// them -- fields after this one are decoded normally.
 				return
-					$"    if (len < pos + 2) return false;\n" +
+					$"    if (len < pos + 6) return false;\n" +
 					"    {\n" +
 					$"        uint16_t {paf.Name}Count_ = (uint16_t)((uint32_t)data[pos] | ((uint32_t)data[pos + 1] << 8));\n" +
-					"        pos += 2;\n" +
+					$"        uint32_t {paf.Name}Bytes_ = (uint32_t)data[pos + 2] | ((uint32_t)data[pos + 3] << 8) | ((uint32_t)data[pos + 4] << 16) | ((uint32_t)data[pos + 5] << 24);\n" +
+					"        pos += 6;\n" +
+					$"        if ((uint64_t){paf.Name}Bytes_ > (uint64_t)(len - pos)) return false;\n" +
 					$"        out.{paf.Name}Count = {paf.Name}Count_;\n" +
 					$"        out.{paf.Name}Data = data + pos;\n" +
-					$"        out.{paf.Name}DataSize = len - pos;\n" +
-					"        pos = len;\n" +
+					$"        out.{paf.Name}DataSize = {paf.Name}Bytes_;\n" +
+					$"        pos += {paf.Name}Bytes_;\n" +
 					"    }\n";
 			case PolymorphicField pf:
 				return
-					$"    out.{pf.Name}Data = data + pos;\n" +
-					$"    out.{pf.Name}DataSize = len - pos;\n" +
-					"    pos = len;\n";
+					$"    if (len < pos + 4) return false;\n" +
+					"    {\n" +
+					$"        uint32_t {pf.Name}Bytes_ = (uint32_t)data[pos] | ((uint32_t)data[pos + 1] << 8) | ((uint32_t)data[pos + 2] << 16) | ((uint32_t)data[pos + 3] << 24);\n" +
+					"        pos += 4;\n" +
+					$"        if ((uint64_t){pf.Name}Bytes_ > (uint64_t)(len - pos)) return false;\n" +
+					$"        out.{pf.Name}Data = data + pos;\n" +
+					$"        out.{pf.Name}DataSize = {pf.Name}Bytes_;\n" +
+					$"        pos += {pf.Name}Bytes_;\n" +
+					"    }\n";
 			default:
 				throw new InvalidOperationException();
 		}
@@ -548,6 +563,11 @@ public static class CppGenerator
 	// EncodedSizeStatement below, this is a compile-time constant (see GenerateMessage's
 	// <Message>_MAX_SIZE). Mirrors EncodeField's actual byte layout field-by-field (count/length
 	// prefixes included) so the two can never silently drift apart.
+	// Little-endian u32 write of a size_t expression at "pos" (bounds already checked by the caller).
+	private static string WriteU32(string expr) =>
+		$"    dest[pos++] = (uint8_t)((uint32_t)({expr}) >> 0); dest[pos++] = (uint8_t)((uint32_t)({expr}) >> 8); " +
+		$"dest[pos++] = (uint8_t)((uint32_t)({expr}) >> 16); dest[pos++] = (uint8_t)((uint32_t)({expr}) >> 24);\n";
+
 	private static int MaxSizeOf(FieldBase f) => f switch
 	{
 		FixedField ff => ff.Size,
@@ -557,12 +577,12 @@ public static class CppGenerator
 		StringField sf => sf.MaxLength + 1,
 		UniformPackedArrayField af => 2 + af.MaxCount * ElementSize(af.Element),
 		UniformVariableArrayField vf => 2 + vf.MaxCount * (vf.MaxElementLength + 1),
-		// 2-byte count prefix, then MaxCount elements each [2-byte classId][largest variant's own
-		// encoded size] -- mirrors Append<...>Element (classId) + <Variant>::Encode (class fields).
-		PolymorphicArrayField paf => 2 + paf.MaxCount * (2 + paf.Variants.Max(ClassMaxSize)),
-		// No count prefix (single element, unlike PolymorphicArrayField) -- just the largest
+		// 2-byte count + 4-byte byte-length prefix, then MaxCount elements each [2-byte classId][largest
+		// variant's own encoded size] -- mirrors Append<...>Element (classId) + <Variant>::Encode.
+		PolymorphicArrayField paf => 6 + paf.MaxCount * (2 + paf.Variants.Max(ClassMaxSize)),
+		// No count prefix (single element), but the 4-byte byte-length prefix, then the largest
 		// variant's own [2-byte classId][class fields].
-		PolymorphicField pf => 2 + pf.Variants.Max(ClassMaxSize),
+		PolymorphicField pf => 4 + 2 + pf.Variants.Max(ClassMaxSize),
 		_ => throw new InvalidOperationException(),
 	};
 
@@ -581,8 +601,8 @@ public static class CppGenerator
 		StringField sf => $"    total += strlen(payload.{sf.Name}) + 1;\n",
 		UniformPackedArrayField af => $"    total += 2 + payload.{af.Name}Count * {ElementSize(af.Element)};\n",
 		UniformVariableArrayField vf => $"    total += 2 + payload.{vf.Name}DataSize;\n",
-		PolymorphicArrayField paf => $"    total += 2 + payload.{paf.Name}DataSize;\n",
-		PolymorphicField pf => $"    total += payload.{pf.Name}DataSize;\n",
+		PolymorphicArrayField paf => $"    total += 6 + payload.{paf.Name}DataSize;\n",
+		PolymorphicField pf => $"    total += 4 + payload.{pf.Name}DataSize;\n",
 		_ => throw new InvalidOperationException(),
 	};
 
@@ -634,8 +654,8 @@ public static class CppGenerator
 	{
 		var sb = new StringBuilder();
 
-		// A class may itself carry (as its last field) a PolymorphicField -- needs the same Append*/
-		// Decode*Elements helpers as a message's trailing polymorphic field. Emitted BEFORE "namespace
+		// A class may itself carry a PolymorphicField -- needs the same Append*/
+		// Decode*Elements helpers as a message's polymorphic field. Emitted BEFORE "namespace
 		// {c.Name} {" opens (not nested under it): the identifiers already embed the owning class +
 		// field name for uniqueness (s. GenerateClassTaggedHelpers), so nesting them one level deeper
 		// would only add a qualification ("Namespace::ClassName::Helper") that callers don't need.
@@ -729,7 +749,8 @@ public static class CppGenerator
 
 		sb.Append($"// Laeuft {fieldName}-Element(e) von 'data' (Laenge 'dataSize') sequentiell ab und ruft 'visitor'\n");
 		sb.Append("// je nach vorangestellter classId mit dem passenden dekodierten Klassen-Payload auf. Gibt false\n");
-		sb.Append("// bei unbekannter classId oder einem zu kurzen/inkonsistenten Element zurueck.\n");
+		sb.Append("// bei unbekannter classId, einem zu kurzen/inkonsistenten Element oder wenn die Elemente den\n");
+		sb.Append("// per Laengenpraefix angegebenen Bereich ('dataSize') nicht genau ausfuellen zurueck.\n");
 		sb.Append("template <typename Visitor>\n");
 		sb.Append($"inline bool Decode{baseName}Elements(const uint8_t* data, size_t dataSize, size_t count, Visitor&& visitor) {{\n");
 		sb.Append("    size_t pos = 0;\n");
@@ -751,7 +772,8 @@ public static class CppGenerator
 		sb.Append("        default: return false;\n");
 		sb.Append("        }\n");
 		sb.Append("    }\n");
-		sb.Append("    return true;\n");
+		sb.Append("    // Die Elemente muessen den per Laengenpraefix angegebenen Bereich genau ausfuellen.\n");
+		sb.Append("    return pos == dataSize;\n");
 		sb.Append("}\n\n");
 
 		return sb.ToString();

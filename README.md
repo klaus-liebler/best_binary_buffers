@@ -25,11 +25,12 @@ Full rationale in the originating conversation (see the consuming project's hist
   - `struct`: **fixed-layout only** -- primitive/enum-ref/struct-ref fields, no `string`, no arrays
     (except `[BinaryCount(N)]`-repeated fixed fields, e.g. a 6-byte MAC as `[BinaryCount(6)] public
     byte[] Bytes;`, never wire-prefixed).
-  - `class`: like `struct`, plus `string` fields are allowed, plus **one** trailing polymorphic field
-    (see `[BinaryUnion]`) is allowed. Still no length-prefixed arrays.
+  - `class`: like `struct`, plus `string` fields and single polymorphic fields (see `[BinaryUnion]`)
+    are allowed, anywhere and any number of them. Still no other length-prefixed arrays.
 - `[BinaryMessage(MessageKind.Event|Request|Response)]` on a `class` -- the wire-addressable root
-  (namespace id + type id header). Only a message may contain a length-prefixed array field, and only
-  one such array (or one trailing single polymorphic field), which must be the last field.
+  (namespace id + type id header). Only a message may contain length-prefixed arrays (`T[]` without
+  `[BinaryCount]`: fixed-size elements, strings or polymorphic elements) -- any number of them, at any
+  position.
   The kind decides the generated `Encode()`/`encode()`: the correlation ID (see the header below) is a
   required parameter for `Request`/`Response` messages and optional (0) for `Event` messages.
 - `[BinaryUnion]` on an `interface` -- marks it as a polymorphic discriminator; every `[BinaryType]`
@@ -46,6 +47,8 @@ see above).
 - Little-endian throughout.
 - Strings: UTF-8 bytes + a single `0x00` terminator. No length prefix.
 - Message-level arrays (`T[]` fields without `[BinaryCount]`): `ushort` (2-byte) element count prefix.
+- Polymorphic fields additionally carry a `uint` (4-byte) **byte-length** prefix covering their elements:
+  array `[count:u16][byteLength:u32][elements]`, single field `[byteLength:u32][classId:u16][fields]`.
 - `[BinaryCount(N)]` fields: N raw elements back to back, never wire-prefixed (size is schema-time only).
 - Polymorphic elements: 2-byte classId immediately before each element's own encoded bytes.
 - A message frame starts with an 8-byte header (`HEADER_SIZE`):
@@ -88,11 +91,14 @@ void write_holding(WsProtocol::Responder& reply, const modbus::WriteHoldingReque
 `Send()` puts the request's correlation into the response, `Error()` answers only if the requester
 waits (correlation != 0).
 
-A polymorphic field (`[BinaryUnion]`-typed, single or array) must be the very last field of its owner
-and there may be at most one per owner -- decoding it is deferred (the owner's `Decode()` just records
-the count/classId and jumps straight to the end of the frame; actual per-element decoding happens later,
-on demand, via a generated visitor function, to avoid parsing twice). That only works if nothing else in
-the frame follows.
+Decoding a polymorphic field (`[BinaryUnion]`-typed, single or array) is deferred in C++: the owner's
+`Decode()` only records start, count and byte length and skips the elements; they are decoded later, on
+demand, by a generated visitor function (`Decode<Owner><Field>Elements`), to avoid parsing twice and
+without heap allocation. The byte-length prefix is what makes the skipping possible -- so a polymorphic
+field may be followed by further fields, and an owner may have several. The visitor rejects elements
+that do not fill the announced byte length exactly. (Before the byte-length prefix existed, `Decode()`
+had to jump to the end of the frame, so a polymorphic field had to be the single, last field of its
+owner. Frames of the two formats are not compatible -- regenerate both ends.)
 
 ## Usage
 

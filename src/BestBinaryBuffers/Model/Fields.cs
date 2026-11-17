@@ -54,14 +54,12 @@ public sealed record UniformPackedArrayField(string Name, string? Description, F
 public sealed record UniformVariableArrayField(string Name, string? Description, int MaxCount, int MaxElementLength) : FieldBase(Name, Description);
 
 // Message/Class-only. Heterogeneous/polymorphic array: each element is one of several declared classes,
-// tagged with a 2-byte classId. Decoding a message's Data/Count is DEFERRED (top-level Decode() just
-// captures "count" and jumps to end of frame -- actual per-element decoding happens later, on demand,
-// via a separate visitor function) to avoid double-parsing. Precisely BECAUSE of that deferral, at most
-// one PolymorphicArrayField/PolymorphicField total is allowed per owner, and it must be the last field
-// (see SchemaValidation) -- a second one wouldn't know where the frame actually continues. This is a
-// deliberate tightening vs. the JSON-schema generator this library replaces, which permitted several
-// consecutive trailing class-array fields but had a latent decode bug for exactly that case (the second
-// trailing field's Decode always read past a "pos" already forced to the frame's end).
+// tagged with a 2-byte classId. Wire: [count:u16][byteLength:u32][elements]. Decoding is DEFERRED
+// (Decode() only records count, start and byte length and skips the elements -- actual per-element
+// decoding happens later, on demand, via a separate visitor function) to avoid double-parsing. Because
+// of the byte-length prefix the field may appear anywhere and several times per owner. (Formerly,
+// without that prefix, Decode() had to jump to the end of the frame, so only one such field, as the
+// last one, was allowed.)
 // MaxCount ([BinaryMaxItemCount], mandatory) bounds the element count; the per-element size used
 // against it is the largest Variant's own (recursively computed) encoded size, no separate
 // attribute needed for that part.
@@ -69,5 +67,6 @@ public sealed record PolymorphicArrayField(string Name, string? Description, IRe
 
 // Like PolymorphicArrayField, but a single element instead of a list (no count prefix) -- for fields
 // that are, at runtime, one of several classes without being a list (e.g. "one of three schedule
-// variants"). Same trailing-only / at-most-one restriction as PolymorphicArrayField, for the same reason.
+// variants"). Wire: [byteLength:u32][classId:u16][class fields]; may appear anywhere, like
+// PolymorphicArrayField.
 public sealed record PolymorphicField(string Name, string? Description, IReadOnlyList<ClassDef> Variants) : FieldBase(Name, Description);

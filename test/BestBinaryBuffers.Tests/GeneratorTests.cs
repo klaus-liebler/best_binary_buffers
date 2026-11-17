@@ -101,10 +101,10 @@ public class GeneratorTests
 		// ResponseStatus mixes every variable-length kind (Waypoints/Tags/Commands are
 		// Uniform*/Polymorphic) -- MAX_SIZE must be a real constexpr, not the runtime-dependent
 		// EncodedSize(). Exact arithmetic (header 8 + Timestamp 4 + Position 12 + Mood 1 + Address 6 +
-		// Waypoints (2+8*12) + Tags (2+4*16) + Commands (2+4*(2+64))) = 461, recomputed here so the test
+		// Waypoints (2+8*12) + Tags (2+4*16) + Commands (2 count + 4 byte length + 4*(2+64))) = 465, recomputed here so the test
 		// breaks loudly if the formula in CppGenerator.MaxSizeOf ever silently drifts from EncodeField's
 		// actual wire layout.
-		Assert.Contains("constexpr size_t ResponseStatus_MAX_SIZE = 461;", cpp);
+		Assert.Contains("constexpr size_t ResponseStatus_MAX_SIZE = 465;", cpp);
 		// NotifyThing has just one bounded string (MaxLength 127) plus the 8-byte header.
 		Assert.Contains("constexpr size_t NotifyThing_MAX_SIZE = 136;", cpp);
 	}
