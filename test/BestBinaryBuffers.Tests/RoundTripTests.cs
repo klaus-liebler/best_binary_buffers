@@ -78,8 +78,13 @@ public class RoundTripTests(ITestOutputHelper output)
 		    size_t singleSize = rt::AppendSceneSingleDotElement(rt::Dot::Payload{42}, single, 0, sizeof single);
 		    size_t secondSize = rt::AppendSceneSecondGroupElement(rt::Group::Payload{1, inner2, n2, 2}, second, 0, sizeof second);
 		    const uint16_t outValues[] = {16390, 7};
-		    for (size_t i = 0; i < 2; i++)
-		        rt::EncodePwmOutputsElement(outValues[i], outs + i * rt::PwmOutputs_ELEMENT_SIZE, sizeof outs - i * rt::PwmOutputs_ELEMENT_SIZE);
+		    CHECK(rt::EncodePwmOutputsElements(outValues, outs, 2 * rt::PwmOutputs_ELEMENT_SIZE - 1) == 0); // too small for both
+		    const int asInts[] = {16389, 6};
+		    CHECK(rt::EncodePwmOutputsElements(asInts, outs, sizeof outs, [](int v) { return static_cast<uint16_t>(v + 1); }) ==
+		          2 * rt::PwmOutputs_ELEMENT_SIZE); // through a projection: the same bytes as outValues
+		    uint8_t direct[16];
+		    CHECK(rt::EncodePwmOutputsElements(outValues, direct, sizeof direct) == 2 * rt::PwmOutputs_ELEMENT_SIZE);
+		    CHECK(std::memcmp(direct, outs, 2 * rt::PwmOutputs_ELEMENT_SIZE) == 0);
 		    std::memcpy(tags, "a\0bc\0", 5);
 		    size_t pp = rt::AppendPwmPartsDotElement(rt::Dot::Payload{3}, parts, 0, sizeof parts);
 		    pp = rt::AppendPwmPartsWordElement(rt::Word::Payload{"x"}, parts, pp, sizeof parts);

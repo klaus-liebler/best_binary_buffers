@@ -704,6 +704,24 @@ public static class CppGenerator
 		sb.Append("    size_t pos = 0;\n");
 		sb.Append(DecodeValueInto(af.Element, "out"));
 		sb.Append("    return true;\n}\n\n");
+		// The whole array in one call (the field's ...Data buffer): every element of a range, optionally
+		// through a projection from the sender's own type -- no hand-written offset loop at the caller.
+		sb.Append($"// Encodes every element of 'items' one after the other into 'dest' (the {af.Name}Data buffer),\n");
+		sb.Append($"// each through 'project' (from the caller's own type to {elementType}); returns the bytes\n");
+		sb.Append("// written, 0 if 'dest_size' is too small for all of them.\n");
+		sb.Append("template <typename Items, typename Project>\n");
+		sb.Append($"inline size_t Encode{baseName}Elements(const Items& items, uint8_t* dest, size_t dest_size, Project&& project) {{\n");
+		sb.Append("    size_t pos = 0;\n");
+		sb.Append("    for (const auto& item : items) {\n");
+		sb.Append($"        const size_t n = Encode{baseName}Element(project(item), dest + pos, dest_size - pos);\n");
+		sb.Append("        if (n == 0) return 0;\n");
+		sb.Append("        pos += n;\n");
+		sb.Append("    }\n");
+		sb.Append("    return pos;\n}\n\n");
+		sb.Append("template <typename Items>\n");
+		sb.Append($"inline size_t Encode{baseName}Elements(const Items& items, uint8_t* dest, size_t dest_size) {{\n");
+		sb.Append($"    return Encode{baseName}Elements(items, dest, dest_size, [](const {elementType}& item) -> const {elementType}& {{ return item; }});\n");
+		sb.Append("}\n\n");
 		return sb.ToString();
 	}
 
